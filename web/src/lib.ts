@@ -367,7 +367,8 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
     case 'artifact_index_failed':
       return ['File indexing hit an error — see Settings audit for details.', true];
     default:
-      return [`${app} recorded ${ev.event_type.replace(/_/g, ' ')}.`, true];
+      // Default: hide. §5.9 is a whitelist — events not in the deck stay in Settings audit until copy is approved.
+      return ['', false];
   }
 }
 
@@ -384,6 +385,7 @@ export function latelyTone(ev: ActivityEvent): LatelyTone {
     ev.event_type === 'snapshot_failed' ||
     ev.event_type === 'agent_failed' ||
     ev.event_type === 'verification_failed' ||
+    ev.event_type === 'artifact_index_failed' ||
     (ev.event_type === 'snapshot_captured' && d.build_status === 'red')
   ) return 'failure';
   return 'plain';

@@ -142,12 +142,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ? payload.produced_by.trim()
     : "cc-index-artifacts";
   const prune = payload.prune === true;
-  const force = payload.force === true;
 
   if (!Array.isArray(payload.items)) return bad("items must be an array");
-  if (prune && payload.items.length < 5 && !force) {
-    return bad(`Refusing to prune with ${payload.items.length} items (< 5). Pass force=true to override.`);
-  }
 
   const nowIso = new Date().toISOString();
   const errors: Array<{ path: string | null; error: string }> = [];
@@ -238,6 +234,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   if (prune) {
+    if (scanPaths.size < 5 && payload.force !== true) {
+      return bad(`Refusing to prune with ${scanPaths.size} validated paths (< 5). Pass force=true to override.`, 400);
+    }
+    if (failed > 0) {
+      console.warn(
+        `WARN: prune requested but ${failed} items failed validation; pruning may be unsafe`,
+      );
+    }
     try {
       const existingRows = await cpGet("cc_artifacts?select=id,path&source=eq.repo_scan&deleted_at=is.null");
       for (const row of existingRows) {

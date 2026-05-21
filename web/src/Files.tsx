@@ -298,7 +298,7 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
         <div>
           <div className="band-title">Files.</div>
           <div className="band-sub">Every file the Command Center knows about — docs, migrations, edge functions, agent outputs.</div>
-          {items.length > 0 && latestAgo && <div className={`band-sub files-indexed-sub${staleTone}`}>Last indexed {latestAgo}.</div>}
+          {latestAgo && <div className={`band-sub files-indexed-sub${staleTone}`}>Last indexed {latestAgo}.</div>}
         </div>
         <span className="count-chip">{loading && !initialLoaded ? 'loading' : tally}</span>
       </div>

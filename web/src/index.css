@@ -281,7 +281,7 @@ nav{display:flex;flex-direction:column;gap:3px}
 .file-drawer-actions .ghost-btn:disabled{opacity:.45;cursor:default}
 .file-raw-link{display:flex}
 .files-more-wrap{display:flex;flex-direction:column;align-items:center;gap:8px;justify-content:center;padding:14px 18px 18px;border-top:1px solid var(--line)}
-.files-more{margin-left:0;min-width:150px}
+.files-more{margin-left:0;min-width:150px;min-height:44px}
 .files-more-error{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--red);max-width:620px;text-align:center;word-break:break-word}
 .files-empty{padding:34px 18px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px}
 .files-empty-title{font-size:14px;font-weight:700;color:var(--text)}
