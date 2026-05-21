@@ -1,0 +1,15 @@
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Tool state (orchestration scratch, not source)
+.omx/
+*.skill
+
+# Supabase CLI scratch
+supabase/.temp/
+
+# Dependencies / build output (web tree has its own .gitignore for node_modules)
+node_modules/
+dist/
