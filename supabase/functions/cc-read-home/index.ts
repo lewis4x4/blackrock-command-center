@@ -195,11 +195,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let appsRows: unknown[];
   let integrationRows: unknown[];
   let snapshotRows: unknown[];
+  let issueRows: unknown[];
   try {
-    [appsRows, integrationRows, snapshotRows] = await Promise.all([
+    [appsRows, integrationRows, snapshotRows, issueRows] = await Promise.all([
       cpGet("v_command_center_home?select=*"),
       cpGet("registry_app_integrations?select=app_id,status"),
       cpGet("registry_app_snapshots?select=app_id,captured_at,roadmap_counts&order=captured_at.desc&limit=200"),
+      cpGet("cc_issues?select=id,app_id,issue_type,source_ref,status,severity,title,summary,surfaced_at,last_seen_at,created_at,updated_at&resolved_at=is.null&deleted_at=is.null&status=not.in.(done,dismissed)&order=surfaced_at.desc"),
     ]);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -221,6 +223,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   return buildJsonResponse({
     apps,
+    issues: issueRows,
     generated_at: new Date().toISOString(),
   }, 200, access.headerValue);
 });

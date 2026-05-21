@@ -40,6 +40,8 @@ type AccessResult = {
 };
 
 type VerifyKey = CryptoKey | Uint8Array;
+type DataPlaneKeyClass = "readonly" | "service_role" | null;
+
 const jwkCache = new Map<string, VerifyKey>();
 
 const UUID_RE =
@@ -142,10 +144,16 @@ async function verifyAccessJwt(assertion: string | null): Promise<AccessResult> 
 }
 
 function readSecretPresence(secretRef: unknown): boolean {
-  const ref = asString(secretRef);
+  const ref = asString(secretRef)?.trim();
   if (!ref) return false;
   const resolved = Deno.env.get(ref);
   return typeof resolved === "string" && resolved.length > 0;
+}
+
+function resolveDataPlaneKeyClass(supabaseRec: Record<string, unknown>): DataPlaneKeyClass {
+  if (readSecretPresence(supabaseRec.readonly_secret_ref)) return "readonly";
+  if (readSecretPresence(supabaseRec.service_secret_ref)) return "service_role";
+  return null;
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -189,7 +197,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       snapshotRows,
     ] = await Promise.all([
       cpGet(`registry_apps?id=eq.${appId}&deleted_at=is.null&select=*`),
-      cpGet(`registry_app_supabase?app_id=eq.${appId}&select=project_ref,project_url,region,snapshot_contract_version,service_secret_ref&limit=1`),
+      cpGet(`registry_app_supabase?app_id=eq.${appId}&select=project_ref,project_url,region,snapshot_contract_version,readonly_secret_ref,service_secret_ref&limit=1`),
       cpGet(`registry_app_linear?app_id=eq.${appId}&select=workspace_name,team_key,api_key_ref,webhook_secret_ref,status_map,stream_project_map&limit=1`),
       cpGet(`registry_app_repo?app_id=eq.${appId}&select=github_repo,default_branch,roadmap_doc_path,github_install_id&limit=1`),
       cpGet(`registry_app_owners?app_id=eq.${appId}&select=person_name,person_email,portal_role,is_decision_owner`),
@@ -224,13 +232,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
     last_verified_at: asString(row.last_verified_at),
   }));
 
+  const dataPlaneKeyClass = resolveDataPlaneKeyClass(supabaseRec);
   const supabase = {
     project_ref: asString(supabaseRec.project_ref),
     project_url: asString(supabaseRec.project_url),
     region: asString(supabaseRec.region),
     snapshot_contract_version: supabaseRec.snapshot_contract_version,
+    readonly_secret_ref: asString(supabaseRec.readonly_secret_ref),
+    readonly_secret_ref_set: readSecretPresence(supabaseRec.readonly_secret_ref),
     service_secret_ref: asString(supabaseRec.service_secret_ref),
     service_secret_ref_set: readSecretPresence(supabaseRec.service_secret_ref),
+    data_plane_key_class: dataPlaneKeyClass,
   };
 
   const linear = {

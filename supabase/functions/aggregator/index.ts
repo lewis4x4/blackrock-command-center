@@ -7,10 +7,11 @@
 //
 // Federated by design:
 //   - The control plane never cross-joins client databases. It POLLS.
-//   - Each app's service-role key is resolved at runtime by NAME: the registry
-//     row registry_app_supabase.service_secret_ref holds the *name* of a
-//     control-plane edge-function secret (convention: SVC_KEY_<SHORTCODE>).
-//     The raw key is never stored in a registry row.
+//   - Each app's read-only key is resolved at runtime by NAME: the registry
+//     row registry_app_supabase.readonly_secret_ref holds the *name* of a
+//     control-plane edge-function secret (convention: READ_KEY_<SHORTCODE>).
+//     During cutover, service_secret_ref / SVC_KEY_<SHORTCODE> remains a
+//     fallback only. The raw key is never stored in a registry row.
 //
 // Auth: custom shared-secret header. The function is deployed verify_jwt=false
 // and instead checks X-Aggregator-Token against the AGGREGATOR_TOKEN secret.
@@ -61,23 +62,78 @@ async function cpRpc(fn: string, args: unknown): Promise<unknown> {
   return r.json();
 }
 
-// Poll one app's cc_export_snapshot() contract via PostgREST RPC.
-async function pollApp(app: any): Promise<any> {
-  const dp = app.registry_app_supabase;
-  if (!dp || !dp.project_url) throw new Error("no data-plane (registry_app_supabase) record");
-  const secretName: string | null = dp.service_secret_ref;
-  if (!secretName) throw new Error("registry_app_supabase.service_secret_ref is empty");
+type DataPlaneKeyClass = "readonly" | "service_role";
 
-  const key = Deno.env.get(secretName);
-  if (!key) throw new Error(`control-plane secret '${secretName}' is not set`);
+type DataPlaneKey = {
+  key: string;
+  keyClass: DataPlaneKeyClass;
+  secretName: string;
+};
 
+type PollResult = {
+  snapshot: any;
+  keyClass: DataPlaneKeyClass;
+  secretName: string;
+  fallbackFrom: { key_class: DataPlaneKeyClass; error: string } | null;
+};
+
+function normalizeSecretRef(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function resolveDataPlaneKeys(dp: any): DataPlaneKey[] {
+  const readonlySecretName = normalizeSecretRef(dp.readonly_secret_ref);
+  const serviceSecretName = normalizeSecretRef(dp.service_secret_ref);
+  const keys: DataPlaneKey[] = [];
+
+  for (const candidate of [
+    { secretName: readonlySecretName, keyClass: "readonly" as const },
+    { secretName: serviceSecretName, keyClass: "service_role" as const },
+  ]) {
+    if (!candidate.secretName) continue;
+    const key = Deno.env.get(candidate.secretName);
+    if (key) keys.push({ key, keyClass: candidate.keyClass, secretName: candidate.secretName });
+  }
+
+  if (keys.length > 0) return keys;
+
+  if (!readonlySecretName && !serviceSecretName) {
+    throw new Error("registry_app_supabase.readonly_secret_ref and service_secret_ref are empty");
+  }
+
+  const missing = [readonlySecretName, serviceSecretName].filter(Boolean).join("' or '");
+  throw new Error(`control-plane secret '${missing}' is not set`);
+}
+
+async function callSnapshot(dp: any, credential: DataPlaneKey): Promise<any> {
   const r = await fetch(`${dp.project_url}/rest/v1/rpc/cc_export_snapshot`, {
     method: "POST",
-    headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    headers: { apikey: credential.key, Authorization: `Bearer ${credential.key}`, "Content-Type": "application/json" },
     body: "{}",
   });
-  if (!r.ok) throw new Error(`cc_export_snapshot RPC -> ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(`cc_export_snapshot RPC (${credential.keyClass}) -> ${r.status} ${await r.text()}`);
   return r.json();
+}
+
+// Poll one app's cc_export_snapshot() contract via PostgREST RPC.
+async function pollApp(app: any): Promise<PollResult> {
+  const dp = app.registry_app_supabase;
+  if (!dp || !dp.project_url) throw new Error("no data-plane (registry_app_supabase) record");
+
+  let fallbackFrom: PollResult["fallbackFrom"] = null;
+  let lastError: string | null = null;
+
+  for (const credential of resolveDataPlaneKeys(dp)) {
+    try {
+      const snapshot = await callSnapshot(dp, credential);
+      return { snapshot, keyClass: credential.keyClass, secretName: credential.secretName, fallbackFrom };
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (!fallbackFrom) fallbackFrom = { key_class: credential.keyClass, error: lastError };
+    }
+  }
+
+  throw new Error(lastError ?? "cc_export_snapshot RPC failed");
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -102,7 +158,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let apps: any[];
   try {
     apps = await cpGet(
-      "registry_apps?select=id,short_code,display_name,registry_app_supabase(project_url,project_ref,service_secret_ref,snapshot_contract_version)&status=eq.active&deleted_at=is.null",
+      "registry_apps?select=id,short_code,display_name,registry_app_supabase(project_url,project_ref,readonly_secret_ref,service_secret_ref,snapshot_contract_version)&status=eq.active&deleted_at=is.null",
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -116,7 +172,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   for (const app of apps) {
     try {
-      const snap = await pollApp(app);
+      const { snapshot: snap, keyClass, secretName, fallbackFrom } = await pollApp(app);
 
       await cpInsert("registry_app_snapshots", {
         app_id: app.id,
@@ -125,7 +181,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         decision_counts: snap.decision_counts ?? {},
         sync_health: snap.sync_health ?? {},
         build_status: snap.build_status ?? "unknown",
-        aggregator_note: `Aggregator poll. contract_version ${snap.contract_version ?? "?"}.`,
+        aggregator_note: `Aggregator poll. contract_version ${snap.contract_version ?? "?"}. key_class ${keyClass}.`,
       });
 
       await cpInsert("cc_audit_events", {
@@ -136,6 +192,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
           short_code: app.short_code,
           build_status: snap.build_status ?? "unknown",
           contract_version: snap.contract_version ?? null,
+          key_class: keyClass,
+          secret_ref: secretName,
+          fallback_from: fallbackFrom,
         },
       });
 

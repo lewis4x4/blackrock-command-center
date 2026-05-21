@@ -38,9 +38,13 @@ const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   "snapshot_failed",
   "app_provisioned",
   "decision_answered",
+  "issue_resolved",
   "decision_routed",
   "decision_reply_received",
   "work_order_created",
+  "pr_opened",
+  "work_order_failed",
+  "work_order_dead_lettered",
   "agent_dispatched",
   "agent_finished",
   "agent_failed",
@@ -54,6 +58,12 @@ const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
 ];
 
 type CursorToken = { occurred_at: string; id: number };
+
+type LatelyMapping = {
+  visible: boolean;
+  sentence: string | null;
+  tone: "plain" | "needs" | "failure";
+};
 
 type AccessResult = {
   ok: boolean;
@@ -94,6 +104,32 @@ function asNumber(value: unknown): number | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function eventAppName(registry: Record<string, unknown> | null): string {
+  const displayName = registry ? asString(registry.display_name) : null;
+  const shortCode = registry ? asString(registry.short_code) : null;
+  return displayName ?? shortCode ?? "an app";
+}
+
+function latelyMapping(eventType: string | null, registry: Record<string, unknown> | null): LatelyMapping {
+  const app = eventAppName(registry);
+  switch (eventType) {
+    case "work_order_created":
+      return { visible: true, sentence: `You sent a build task to ${app}.`, tone: "plain" };
+    case "work_order_claimed":
+      return { visible: false, sentence: null, tone: "plain" };
+    case "pr_opened":
+      return { visible: true, sentence: `${app} has a PR ready for review.`, tone: "plain" };
+    case "work_order_failed":
+    case "work_order_dead_lettered":
+      return { visible: true, sentence: `${app} build failed — needs a look.`, tone: "failure" };
+    case "work_order_lease_expired":
+    case "agents_page_read":
+      return { visible: false, sentence: null, tone: "plain" };
+    default:
+      return { visible: LATELY_VISIBLE_EVENT_TYPES.includes(eventType ?? ""), sentence: null, tone: "plain" };
+  }
 }
 
 function encodeCursor(c: CursorToken): string {
@@ -210,7 +246,7 @@ function parseLatelyOnly(raw: string | null): boolean {
 
 function buildQuery(limit: number, cursor: CursorToken | null, latelyOnly: boolean): string {
   const params = new URLSearchParams();
-  params.set("select", "occurred_at,actor,event_type,detail,app_id,id,registry_apps(short_code)");
+  params.set("select", "occurred_at,actor,event_type,detail,app_id,id,registry_apps(short_code,display_name)");
   params.append("order", "occurred_at.desc");
   params.append("order", "id.desc");
   params.set("limit", String(limit + 1));
@@ -275,13 +311,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
       ? rec.registry_apps.find(isRecord)
       : (isRecord(rec.registry_apps) ? rec.registry_apps : null);
 
+    const registryRecord = registry ?? null;
+    const eventType = asString(rec.event_type);
+    const mapping = latelyMapping(eventType, registryRecord);
+
     return {
       occurred_at: asString(rec.occurred_at),
       actor: asString(rec.actor),
-      event_type: asString(rec.event_type),
+      event_type: eventType,
       detail: isRecord(rec.detail) ? rec.detail : null,
       app_id: asString(rec.app_id),
       short_code: registry ? asString(registry.short_code) : null,
+      app_name: eventAppName(registryRecord),
+      lately: mapping,
       id: asNumber(rec.id),
     };
   });

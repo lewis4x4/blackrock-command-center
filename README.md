@@ -75,15 +75,17 @@ Phase 1 is done — you open one screen and see every project. After that, app b
 
 ### Operator secrets (control-plane project)
 
-The Aggregator needs two edge-function secrets on the control-plane project. Set them once:
+The Aggregator needs edge-function secrets on the control-plane project. Set them once:
 
 ```
 supabase secrets set AGGREGATOR_TOKEN="<token>" --project-ref gsvhuzpysxaegoecwjmf
+supabase secrets set READ_KEY_QEP="<QEP command_center JWT>" --project-ref gsvhuzpysxaegoecwjmf
 supabase secrets set SVC_KEY_QEP="<QEP service-role key>" --project-ref gsvhuzpysxaegoecwjmf
 ```
 
 - `AGGREGATOR_TOKEN` — must equal the Supabase Vault secret `aggregator_token` (the cron job sends it as `X-Aggregator-Token`).
-- `SVC_KEY_<SHORTCODE>` — each app's data-plane service-role key. The registry column `registry_app_supabase.service_secret_ref` holds the *name* of this secret, never the key.
+- `READ_KEY_<SHORTCODE>` — each app's scoped read-only data-plane JWT. The registry column `registry_app_supabase.readonly_secret_ref` holds the *name* of this secret, never the key.
+- `SVC_KEY_<SHORTCODE>` — fallback only during the god-credential retirement cutover. The registry column `registry_app_supabase.service_secret_ref` holds the *name* of this secret, never the key.
 
 ---
 

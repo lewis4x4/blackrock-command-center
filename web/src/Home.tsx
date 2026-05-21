@@ -1,16 +1,25 @@
 import { useState, type ReactNode } from 'react';
 import {
-  ago, sum, hoursOld, deriveTriage, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone,
-  type AppRow, type ActivityEvent, type TriageItem, type BuildStatus,
+  ago, sum, hoursOld, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone,
+  type AppRow, type ActivityEvent, type TriageItem, type BuildStatus, type IssueRow, type TriageSev,
 } from './lib';
+import { CheckSyncPanel, OpenDecisionsPanel, ReviewBlockersPanel, ViewBuildPanel } from './TriagePanels';
 
-/* WIRE-UP: nav sections beyond Home are stubs — route to /<section> later. */
+/* WIRE-UP: remaining nav sections beyond Home/Files/Agents are stubs. */
 function stub(name: string) {
   alert(`${name} — section not built yet (current phase: home + shell).`);
 }
 
-/* Deep link into an app's own surface (registry_apps.app_url). */
+function appSlug(app: AppRow): string {
+  return app.short_code.toLowerCase();
+}
+
+/* Primary app action: stay inside the Command Center cockpit. */
 function openApp(app: AppRow) {
+  window.location.hash = `#/apps/${appSlug(app)}`;
+}
+
+function openExternalApp(app: AppRow) {
   if (app.app_url) window.open(app.app_url, '_blank', 'noopener');
   else alert(`No live URL set for ${app.display_name} yet.`);
 }
@@ -22,7 +31,7 @@ const chevron = (
 /* ============================================================================
    SHELL — left rail + topbar, wraps every view
    ============================================================================ */
-export type ShellPage = 'home' | 'files';
+export type ShellPage = 'home' | 'agents' | 'files' | `app:${string}`;
 
 export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children }: {
   demo: boolean;
@@ -69,7 +78,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
         </div>
         <nav>
           {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Settings'] as const).map((name) => {
-            const page = name === 'Home' ? 'home' : name === 'Files' ? 'files' : null;
+            const page = name === 'Home' ? 'home' : name === 'Agents' ? 'agents' : name === 'Files' ? 'files' : null;
             const active = page === activePage;
             return (
               <button
@@ -95,7 +104,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
       <div className="main">
         <div className="topbar">
           <div className="topbar-inner">
-          <div className="page-title">{activePage === 'files' ? 'Files' : 'Home'}</div>
+          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
               <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />
@@ -121,12 +130,15 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
 /* ============================================================================
    HOME — portfolio strip + three bands
    ============================================================================ */
-export function HomeView({ apps, activity }: { apps: AppRow[]; activity: ActivityEvent[] }) {
+export function HomeView({ apps, issues, activity, demo, onResolved }: { apps: AppRow[]; issues: IssueRow[]; activity: ActivityEvent[]; demo: boolean; onResolved: () => void | Promise<void> }) {
+  const [openItem, setOpenItem] = useState<TriageItem | null>(null);
   const sorted = [...apps].sort((a, b) => b.criticality - a.criticality);
+  const appById = new Map(sorted.map((app) => [app.id, app]));
 
-  const triage: TriageItem[] = [];
-  sorted.forEach((a) => triage.push(...deriveTriage(a)));
-  triage.sort((a, b) => SEV_RANK[a.sev] - SEV_RANK[b.sev] || b.app.criticality - a.app.criticality);
+  const triage = issues
+    .map((issue) => issueToTriage(issue, appById.get(issue.app_id)))
+    .filter((item): item is TriageItem => !!item)
+    .sort((a, b) => SEV_RANK[a.sev] - SEV_RANK[b.sev] || b.app.criticality - a.app.criticality || a.issue.surfaced_at.localeCompare(b.issue.surfaced_at));
 
   const active = sorted.filter((a) => a.status === 'active').length;
   const openDec = sorted.reduce((n, a) => n + (a.decision_counts?.open ?? 0), 0);
@@ -151,11 +163,51 @@ export function HomeView({ apps, activity }: { apps: AppRow[]; activity: Activit
         <Cell k="Health" v={pf.t} cls={pf.c} small />
       </div>
 
-      <TriageBand items={triage} />
+      <TriageBand items={triage} onOpen={setOpenItem} />
       <ProjectsBand apps={sorted} />
       <ActivityBand activity={activity} />
+      {openItem && (
+        <TriagePanelHost
+          item={openItem}
+          demo={demo}
+          onClose={() => setOpenItem(null)}
+          onResolved={() => {
+            setOpenItem(null);
+            void onResolved();
+          }}
+        />
+      )}
     </>
   );
+}
+
+function issueSeverity(severity: IssueRow['severity']): TriageSev {
+  if (severity === 'critical') return 'critical';
+  if (severity === 'high') return 'needs';
+  return 'watch';
+}
+
+function issueAction(issueType: IssueRow['issue_type']): string {
+  switch (issueType) {
+    case 'open_decision': return 'Open decisions';
+    case 'build_health': return 'View build';
+    case 'blocked_item': return 'Review blockers';
+    case 'sync_error': return 'Check sync';
+  }
+}
+
+function issueToTriage(issue: IssueRow, app?: AppRow): TriageItem | null {
+  if (!app || app.status === 'paused' || app.status === 'archived') return null;
+  if (!['surfaced', 'triaging', 'gated'].includes(issue.status)) return null;
+  return {
+    id: issue.id,
+    sev: issueSeverity(issue.severity),
+    title: issue.title,
+    sub: issue.summary ?? `${issue.status.replace(/_/g, ' ')} · ${ago(issue.last_seen_at) ?? 'recently'}`,
+    act: issueAction(issue.issue_type),
+    app,
+    issue,
+  };
 }
 
 function Cell({ k, v, cls = '', small = false }: { k: string; v: string; cls?: string; small?: boolean }) {
@@ -167,8 +219,18 @@ function Cell({ k, v, cls = '', small = false }: { k: string; v: string; cls?: s
   );
 }
 
+function TriagePanelHost({ item, demo, onClose, onResolved }: { item: TriageItem; demo: boolean; onClose: () => void; onResolved: () => void }) {
+  const props = { issue: item.issue, app: item.app, onClose, onResolved, demo };
+  switch (item.issue.issue_type) {
+    case 'open_decision': return <OpenDecisionsPanel {...props} />;
+    case 'build_health': return <ViewBuildPanel {...props} />;
+    case 'blocked_item': return <ReviewBlockersPanel {...props} />;
+    case 'sync_error': return <CheckSyncPanel {...props} />;
+  }
+}
+
 /* ───────────────────── Band 1 — triage ──────────────────────────────────── */
-function TriageBand({ items }: { items: TriageItem[] }) {
+function TriageBand({ items, onOpen }: { items: TriageItem[]; onOpen: (item: TriageItem) => void }) {
   return (
     <section className="band">
       <div className="band-head">
@@ -189,7 +251,7 @@ function TriageBand({ items }: { items: TriageItem[] }) {
         </div>
       ) : (
         items.map((t, i) => (
-          <div className={'triage-row ' + t.sev} key={i}>
+          <div className={'triage-row ' + t.sev} key={t.id}>
             <div className="rank">{i + 1}</div>
             <div className="badge" style={{ background: colorFor(t.app.short_code) }}>{t.app.short_code[0]}</div>
             <div className="triage-text">
@@ -197,7 +259,7 @@ function TriageBand({ items }: { items: TriageItem[] }) {
               <div className="triage-sub">{t.sub}{t.app.sample ? ' · sample' : ''}</div>
             </div>
             <div className={'sev ' + t.sev}>{SEV_LABEL[t.sev]}</div>
-            <button className="act-btn" onClick={() => openApp(t.app)}>{t.act}</button>
+            <button className="act-btn" onClick={() => onOpen(t)}>{t.act}</button>
           </div>
         ))
       )}
@@ -319,6 +381,9 @@ function AppCard({ app }: { app: AppRow }) {
       </div>
       <div className="card-foot">
         <button className="open-link" onClick={() => openApp(app)}>Open {app.short_code} {chevron}</button>
+        <button className="external-link" title={`Open ${app.short_code} production app`} onClick={() => openExternalApp(app)} aria-label={`Open ${app.short_code} production app`}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14L21 3" /></svg>
+        </button>
       </div>
     </div>
   );

@@ -1,29 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  INITIAL_DEMO, loadApps, loadActivity,
-  type AppRow, type ActivityEvent,
+  INITIAL_DEMO, loadHome, loadActivity,
+  type AppRow, type ActivityEvent, type IssueRow,
 } from './lib';
 import { Shell, HomeView, type ShellPage } from './Home';
 import { FilesView, type FilesViewHandle } from './Files';
+import { AppDetailView } from './AppDetail';
+import { AgentsView, type AgentsViewHandle } from './Agents';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
 
 function pageFromHash(): ShellPage {
-  return window.location.hash === '#/files' ? 'files' : 'home';
+  const hash = window.location.hash || '#/';
+  if (hash === '#/agents') return 'agents';
+  if (hash === '#/files') return 'files';
+  const appMatch = hash.match(/^#\/apps\/([a-z0-9-]+)$/i);
+  if (appMatch?.[1]) return `app:${appMatch[1].toLowerCase()}`;
+  return 'home';
 }
 
 function hashForPage(page: ShellPage): string {
-  return page === 'files' ? '#/files' : '#/';
+  if (page === 'agents') return '#/agents';
+  if (page === 'files') return '#/files';
+  if (page.startsWith('app:')) return `#/apps/${page.slice(4)}`;
+  return '#/';
+}
+
+function slugFromPage(page: ShellPage): string | null {
+  return page.startsWith('app:') ? page.slice(4) : null;
 }
 
 export default function App() {
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [page, setPage] = useState<ShellPage>(() => pageFromHash());
   const [apps, setApps] = useState<AppRow[]>([]);
+  const [issues, setIssues] = useState<IssueRow[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [err, setErr] = useState('');
   const filesRef = useRef<FilesViewHandle | null>(null);
+  const agentsRef = useRef<AgentsViewHandle | null>(null);
 
   useEffect(() => {
     void load();
@@ -37,11 +53,12 @@ export default function App() {
   async function load() {
     setLoadState('loading');
     try {
-      const [a, ev] = await Promise.all([
-        loadApps(INITIAL_DEMO),
+      const [home, ev] = await Promise.all([
+        loadHome(INITIAL_DEMO),
         loadActivity(INITIAL_DEMO),
       ]);
-      setApps(a);
+      setApps(home.apps);
+      setIssues(home.issues);
       setActivity(ev);
       setLoadState('ready');
     } catch (e) {
@@ -53,6 +70,10 @@ export default function App() {
   async function onRefresh() {
     if (page === 'files') {
       await filesRef.current?.refresh();
+      return;
+    }
+    if (page === 'agents') {
+      await agentsRef.current?.refresh();
       return;
     }
     await load();
@@ -68,11 +89,19 @@ export default function App() {
     <Shell demo={INITIAL_DEMO} apps={apps} activePage={page} onNavigate={navigate} onRefresh={onRefresh}>
       {page === 'files' ? (
         <FilesView ref={filesRef} />
+      ) : page === 'agents' ? (
+        <AgentsView ref={agentsRef} demo={INITIAL_DEMO} />
+      ) : slugFromPage(page) ? (
+        <>
+          {loadState === 'loading' && <Loading />}
+          {loadState === 'error' && <ErrorState message={err} onRetry={load} />}
+          {loadState === 'ready' && <AppDetailView slug={slugFromPage(page)!} apps={apps} activity={activity} demo={INITIAL_DEMO} />}
+        </>
       ) : (
         <>
           {loadState === 'loading' && <Loading />}
           {loadState === 'error' && <ErrorState message={err} onRetry={load} />}
-          {loadState === 'ready' && <HomeView apps={apps} activity={activity} />}
+          {loadState === 'ready' && <HomeView apps={apps} issues={issues} activity={activity} demo={INITIAL_DEMO} onResolved={load} />}
         </>
       )}
     </Shell>
