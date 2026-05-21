@@ -110,6 +110,7 @@ export interface AppDetailPayload {
   decisions: DetailSectionPayload;
   sync: DetailSectionPayload;
   generated_at?: string;
+  last_snapshot_at?: string | null;
   key_class?: 'readonly' | 'service_role' | null;
 }
 
@@ -306,6 +307,7 @@ export const DEMO_ISSUES: IssueRow[] = [
 export const DEMO_APP_DETAIL: AppDetailPayload = {
   available: true,
   generated_at: new Date().toISOString(),
+  last_snapshot_at: new Date().toISOString(),
   key_class: 'readonly',
   roadmap: {
     next_cursor: null,
@@ -796,6 +798,7 @@ function parseAppDetailPayload(value: unknown): AppDetailPayload {
     decisions: normalizeDetailSection(data.decisions),
     sync: normalizeDetailSection(data.sync),
     generated_at: asString(rec.generated_at) ?? undefined,
+    last_snapshot_at: asString(rec.last_snapshot_at) ?? null,
     key_class: keyClass === 'readonly' || keyClass === 'service_role' ? keyClass : null,
   };
 }
@@ -826,6 +829,7 @@ export async function loadAppCockpitDetail(appId: string, demo: boolean, section
       decisions: emptyDetailSection(),
       sync: emptyDetailSection(),
       generated_at: asString(res.payload.generated_at) ?? undefined,
+      last_snapshot_at: asString(res.payload.last_snapshot_at) ?? null,
       key_class: null,
     };
   }

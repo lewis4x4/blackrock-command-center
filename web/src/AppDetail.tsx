@@ -83,7 +83,7 @@ function HealthHeader({ app, detail, state, onRefresh }: { app: AppRow; detail: 
         <div>
           <div className="detail-eyebrow">{app.short_code} cockpit</div>
           <h1>{app.display_name}</h1>
-          <p>{app.client_name || 'Client app'} · {app.lifecycle_phase} · updated {ago(app.last_snapshot_at) ?? '—'}</p>
+          <p>{app.client_name || 'Client app'} · {app.lifecycle_phase} · updated {ago(detail.last_snapshot_at ?? app.last_snapshot_at) ?? '—'}</p>
         </div>
       </div>
       <div className="detail-hero-actions">

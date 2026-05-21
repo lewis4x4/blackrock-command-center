@@ -268,13 +268,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   let app: Record<string, unknown> | null = null;
   let dp: Record<string, unknown> | null = null;
+  let lastSnapshotAt: string | null = null;
   try {
-    const [appRows, dpRows] = await Promise.all([
+    const [appRows, dpRows, homeRows] = await Promise.all([
       cpGet(`registry_apps?id=eq.${appId}&deleted_at=is.null&select=id,short_code,display_name&limit=1`),
       cpGet(`registry_app_supabase?app_id=eq.${appId}&select=project_url,project_ref,readonly_secret_ref,service_secret_ref&limit=1`),
+      cpGet(`registry_app_snapshots?app_id=eq.${appId}&select=captured_at&order=captured_at.desc&limit=1`),
     ]);
     app = appRows.find(isRecord) ?? null;
     dp = dpRows.find(isRecord) ?? null;
+    const snapshotRow = homeRows.find(isRecord);
+    lastSnapshotAt = snapshotRow ? asString(snapshotRow.captured_at) : null;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "database read failed", detail: msg }, 500, access.headerValue);
@@ -293,6 +297,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         message: "Cockpit detail is not wired for this app yet.",
         app_id: appId,
         section,
+        last_snapshot_at: lastSnapshotAt,
         generated_at: new Date().toISOString(),
       }, 503, access.headerValue);
     }
@@ -324,6 +329,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     section,
     data: detail.data,
     key_class: detail.keyClass,
+    last_snapshot_at: lastSnapshotAt,
     generated_at: new Date().toISOString(),
   }, 200, access.headerValue);
 });
