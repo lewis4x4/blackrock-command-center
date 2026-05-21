@@ -291,6 +291,8 @@ nav{display:flex;flex-direction:column;gap:3px}
 
 @media(prefers-reduced-motion:reduce){
   .file-drawer,.files-inline-progress{animation:none}
+  .skel{animation:none}
+  .refresh.spin svg{animation:none}
 }
 @media(max-width:980px){
   .files-filterbar{grid-template-columns:1fr 1fr;align-items:end}

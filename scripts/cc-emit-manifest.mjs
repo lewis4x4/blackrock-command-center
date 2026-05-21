@@ -4,8 +4,9 @@
 // deploying the edge function.
 //
 // Usage: node scripts/cc-emit-manifest.mjs > /tmp/manifest.json
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep, basename, extname } from 'node:path';
+import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const REPO_ROOT = process.cwd();
@@ -109,13 +110,54 @@ function buildItem(p, size, abs, declared) {
   };
 }
 
-const items = [];
-for (const t of SCAN_TARGETS) for (const f of walk(t.root)) items.push(buildItem(f.relPath, f.size, f.abs, t.kind));
-for (const f of ROOT_FILES) {
+function isGitRepo() {
+  if (existsSync(join(REPO_ROOT, '.git'))) return true;
   try {
-    const abs = join(REPO_ROOT, f.path);
-    if (statSync(abs).isFile()) items.push(buildItem(f.path, statSync(abs).size, abs, f.kind));
-  } catch {}
+    execSync('git rev-parse --is-inside-work-tree', { cwd: REPO_ROOT, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
+
+function listGitTrackedItems() {
+  const items = [];
+  const tracked = execSync('git ls-files', { cwd: REPO_ROOT, encoding: 'utf8' })
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const relPath of tracked) {
+    const target = SCAN_TARGETS.find((t) => relPath === t.root || relPath.startsWith(`${t.root}/`));
+    if (target) {
+      const abs = join(REPO_ROOT, relPath);
+      const s = statSync(abs);
+      if (s.isFile()) items.push(buildItem(relPath, s.size, abs, target.kind));
+      continue;
+    }
+    const rootFile = ROOT_FILES.find((f) => f.path === relPath);
+    if (rootFile) {
+      const abs = join(REPO_ROOT, relPath);
+      const s = statSync(abs);
+      if (s.isFile()) items.push(buildItem(relPath, s.size, abs, rootFile.kind));
+    }
+  }
+
+  return items;
+}
+
+function listFsItems() {
+  const items = [];
+  for (const t of SCAN_TARGETS) for (const f of walk(t.root)) items.push(buildItem(f.relPath, f.size, f.abs, t.kind));
+  for (const f of ROOT_FILES) {
+    try {
+      const abs = join(REPO_ROOT, f.path);
+      if (statSync(abs).isFile()) items.push(buildItem(f.path, statSync(abs).size, abs, f.kind));
+    } catch {}
+  }
+  return items;
+}
+
+const items = isGitRepo() ? listGitTrackedItems() : listFsItems();
 
 console.log(JSON.stringify({ scanned_at: new Date().toISOString(), items }, null, 2));

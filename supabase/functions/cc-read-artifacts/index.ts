@@ -8,7 +8,7 @@ import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jsr:@panv
 //
 // GET/OPTIONS only:
 //   1) Verify Cloudflare Access JWT when CC_ACCESS_REQUIRED=true.
-//   2) Otherwise enforce x-aggregator-token == AGGREGATOR_TOKEN as the interim operator gate.
+//   2) Otherwise enforce x-cc-read-token == CC_READ_TOKEN as the interim READ-ONLY gate.
 //   3) Read cc_artifacts with service-role on the server side and return the Files payload.
 
 const CP_URL = Deno.env.get("SUPABASE_URL")!;
@@ -17,14 +17,14 @@ const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ACCESS_REQUIRED = (Deno.env.get("CC_ACCESS_REQUIRED") ?? "false") === "true";
 const ACCESS_TEAM_DOMAIN = Deno.env.get("CC_ACCESS_TEAM_DOMAIN") ?? "";
 const ACCESS_AUD = Deno.env.get("CC_ACCESS_AUD") ?? "";
-const AGGREGATOR_TOKEN = Deno.env.get("AGGREGATOR_TOKEN") ?? "";
+const CC_READ_TOKEN = Deno.env.get("CC_READ_TOKEN") ?? "";
 
 if (ACCESS_REQUIRED) {
   console.log("Cloudflare Access verification ENABLED (production-ready §4.11)");
-} else if (AGGREGATOR_TOKEN) {
-  console.log("Cloudflare Access verification DISABLED — falling back to x-aggregator-token operator gate (S1 not yet in front)");
+} else if (CC_READ_TOKEN) {
+  console.log("Cloudflare Access verification DISABLED — falling back to x-cc-read-token (S1 not yet in front; READ-ONLY scope)");
 } else {
-  console.log("Cloudflare Access verification DISABLED AND no AGGREGATOR_TOKEN set — function will reject ALL requests");
+  console.log("Cloudflare Access verification DISABLED AND no CC_READ_TOKEN set — function will reject ALL requests");
 }
 
 const cpHeaders = {
@@ -36,7 +36,7 @@ const cpHeaders = {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-aggregator-token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
 };
 
 type CursorToken = { last_indexed_at: string; id: string };
@@ -131,18 +131,18 @@ async function loadJwksIntoCache(teamDomain: string): Promise<void> {
   }
 }
 
-function verifyAggregatorHeader(presented: string | null): AccessResult {
-  if (!AGGREGATOR_TOKEN) {
-    return { ok: false, status: 401, error: "operator token not configured", headerValue: "token" };
+function verifyReadTokenHeader(presented: string | null): AccessResult {
+  if (!CC_READ_TOKEN) {
+    return { ok: false, status: 401, error: "read token not configured", headerValue: "token" };
   }
-  if (!presented || presented !== AGGREGATOR_TOKEN) {
-    return { ok: false, status: 401, error: "missing or invalid x-aggregator-token", headerValue: "token" };
+  if (!presented || presented !== CC_READ_TOKEN) {
+    return { ok: false, status: 401, error: "missing or invalid x-cc-read-token", headerValue: "token" };
   }
   return { ok: true, status: 200, headerValue: "token" };
 }
 
 async function verifyAccessJwt(assertion: string | null): Promise<AccessResult> {
-  if (!ACCESS_REQUIRED) return verifyAggregatorHeader(assertion);
+  if (!ACCESS_REQUIRED) return verifyReadTokenHeader(assertion);
 
   if (!ACCESS_TEAM_DOMAIN || !ACCESS_AUD) {
     return { ok: false, status: 500, error: "CC_ACCESS_TEAM_DOMAIN and CC_ACCESS_AUD are required when CC_ACCESS_REQUIRED=true", headerValue: "pass" };
@@ -274,7 +274,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const access = await verifyAccessJwt(
-    ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-aggregator-token"),
+    ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"),
   );
   if (!access.ok) {
     return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
@@ -289,12 +289,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   let rows: unknown[];
+  let healthRows: unknown[];
   try {
-    rows = await cpGet(buildQuery(filters));
+    [rows, healthRows] = await Promise.all([
+      cpGet(buildQuery(filters)),
+      cpGet("cc_artifacts?select=last_indexed_at&deleted_at=is.null&order=last_indexed_at.desc&limit=1"),
+    ]);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "database read failed", detail: msg }, 500, access.headerValue);
   }
+
+  const healthHead = healthRows[0];
+  const healthRec = isRecord(healthHead) ? healthHead : null;
+  const latestIndexedAt = healthRec ? asString(healthRec.last_indexed_at) : null;
 
   const hasMore = rows.length > filters.limit;
   const pageItems = hasMore ? rows.slice(0, filters.limit) : rows;
@@ -315,6 +323,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
         has_more: hasMore,
       },
       generated_at: new Date().toISOString(),
+      index_health: {
+        latest_indexed_at: latestIndexedAt,
+      },
       filters: {
         q: filters.q,
         kind: filters.kind,

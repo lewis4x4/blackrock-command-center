@@ -1,5 +1,8 @@
 /* Supabase-client-free helpers — safe to import from surfaces that must not pull the DB key into the bundle (§4.11). */
 
+export const INITIAL_DEMO =
+  (import.meta.env.VITE_DEMO_MODE ?? 'true') !== 'false';
+
 export function sum(o: unknown): number {
   if (!o || typeof o !== 'object') return 0;
   return Object.values(o as Record<string, unknown>)

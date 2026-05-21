@@ -1,6 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { INITIAL_DEMO } from './lib';
-import { ago } from './utils';
+import { ago, INITIAL_DEMO } from './utils';
 
 type ArtifactKind = 'doc' | 'migration' | 'edge_function' | 'spec' | 'report' | 'web_source' | 'script' | 'agent_output' | 'pull_request';
 type ArtifactSource = 'repo_scan' | 'agent_run' | 'manual';
@@ -31,6 +30,7 @@ interface ArtifactResponse {
   items: Artifact[];
   cursor: { next: string | null; has_more: boolean };
   generated_at: string;
+  index_health: { latest_indexed_at: string | null };
   filters: Record<string, unknown>;
 }
 
@@ -42,7 +42,7 @@ const LOCAL_REPO = '/Users/brianlewis/Projects/blackrock-command-center';
 const PAGE_SIZE = 50;
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 const FUNCTIONS_URL = (import.meta.env.VITE_CC_FUNCTIONS_URL ?? `${SUPABASE_URL}/functions/v1`).replace(/\/$/, '');
-const OPERATOR_TOKEN = import.meta.env.VITE_CC_OPERATOR_TOKEN ?? '';
+const READ_TOKEN = import.meta.env.VITE_CC_READ_TOKEN ?? '';
 const ACCESS_REQUIRED = (import.meta.env.VITE_CC_ACCESS_REQUIRED ?? 'false') === 'true';
 
 const KIND_OPTIONS: { value: ArtifactKind | ''; label: string }[] = [
@@ -129,6 +129,7 @@ function parseArtifactResponse(value: unknown): ArtifactResponse {
   if (!isRecord(value)) throw new Error('artifact response is invalid');
   const items = Array.isArray(value.items) ? value.items.map(parseArtifact) : [];
   const cursor = isRecord(value.cursor) ? value.cursor : {};
+  const indexHealth = isRecord(value.index_health) ? value.index_health : {};
   return {
     items,
     cursor: {
@@ -136,6 +137,9 @@ function parseArtifactResponse(value: unknown): ArtifactResponse {
       has_more: cursor.has_more === true,
     },
     generated_at: asString(value.generated_at) ?? new Date().toISOString(),
+    index_health: {
+      latest_indexed_at: asString(indexHealth.latest_indexed_at),
+    },
     filters: isRecord(value.filters) ? value.filters : {},
   };
 }
@@ -149,7 +153,7 @@ async function readArtifacts(filters: ArtifactFilters, cursor: string | null): P
   if (cursor) params.set('cursor', cursor);
 
   const headers: Record<string, string> = {};
-  if (!ACCESS_REQUIRED && OPERATOR_TOKEN) headers['x-aggregator-token'] = OPERATOR_TOKEN;
+  if (!ACCESS_REQUIRED && READ_TOKEN) headers['x-cc-read-token'] = READ_TOKEN;
 
   const res = await fetch(`${FUNCTIONS_URL}/cc-read-artifacts?${params.toString()}`, { method: 'GET', headers });
   const payload: unknown = await res.json().catch(() => null);
@@ -205,6 +209,7 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
   const [error, setError] = useState('');
   const [loadMoreError, setLoadMoreError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [latestIndexedAt, setLatestIndexedAt] = useState<string | null>(null);
   const requestSeq = useRef(0);
 
   useEffect(() => {
@@ -227,6 +232,7 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
       setItems(res.items);
       setNextCursor(res.cursor.next);
       setHasMore(res.cursor.has_more);
+      setLatestIndexedAt(res.index_health.latest_indexed_at);
       setExpandedId(null);
       setInitialLoaded(true);
     } catch (e) {
@@ -276,14 +282,6 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
 
   const filtered = hasFilters(effectiveFilters);
   const tally = `${items.length}${hasMore ? '+' : ''} artifact${items.length === 1 && !hasMore ? '' : 's'}`;
-  const latestIndexedAt = useMemo(() => {
-    if (!items.length) return null;
-    let latest: string | null = null;
-    for (const item of items) {
-      if (!latest || new Date(item.last_indexed_at).getTime() > new Date(latest).getTime()) latest = item.last_indexed_at;
-    }
-    return latest;
-  }, [items]);
   const latestAgo = ago(latestIndexedAt);
   const ageMs = latestIndexedAt ? (Date.now() - new Date(latestIndexedAt).getTime()) : null;
   const staleTone = ageMs == null ? '' : ageMs > 7 * 24 * 60 * 60 * 1000 ? ' failure' : ageMs > 24 * 60 * 60 * 1000 ? ' needs' : '';

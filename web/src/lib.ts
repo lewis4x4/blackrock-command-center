@@ -13,7 +13,7 @@
    Every value rendered traces to a column — nothing is invented.
    ============================================================================ */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL } from './utils';
+import { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
 
 /* ───────────────────── Types — the v_command_center_home contract ───────── */
 export type BuildStatus = 'green' | 'yellow' | 'red' | 'unknown';
@@ -72,9 +72,6 @@ export interface TriageItem {
 }
 
 /* ───────────────────── Config + Supabase client ─────────────────────────── */
-export const INITIAL_DEMO =
-  (import.meta.env.VITE_DEMO_MODE ?? 'true') !== 'false';
-
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? '';
 
@@ -240,7 +237,7 @@ export async function loadIntegrations(): Promise<Record<string, Integrations>> 
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */
-export { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL } from './utils';
+export { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
 
 /* ───────────────────── Triage — aggregate signals only ──────────────────── */
 /* The control plane holds counts, never individual tasks/decisions, so every
@@ -303,7 +300,9 @@ function isAuthorizeWorkOrder(d: Record<string, unknown>): boolean {
   return d.risk_class === 'authorize' || d.requires_authorization === true || d.status === 'pending_authorization';
 }
 
-/* cc_audit_events row -> §5.9 Lately [sentence, show]. show=false stays in Settings audit only. */
+/* cc_audit_events row -> §5.9 Lately [sentence, show]. show=false stays in Settings audit only.
+   Indexer events use the §5.9 routine/exception cut: artifacts_indexed is routine (hidden),
+   artifact_index_failed is exceptional (visible). */
 export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean] {
   const d: Record<string, unknown> = ev.detail ?? {};
   const app = eventApp(ev);
@@ -363,6 +362,10 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
       return ["The Mac Studio runner went quiet — builds are paused until it's back.", true];
     case 'handoff_created':
       return [`${app} needs a hand from you — open it for the steps.`, true];
+    case 'artifacts_indexed':
+      return ['', false];
+    case 'artifact_index_failed':
+      return ['File indexing hit an error — see Settings audit for details.', true];
     default:
       return [`${app} recorded ${ev.event_type.replace(/_/g, ' ')}.`, true];
   }

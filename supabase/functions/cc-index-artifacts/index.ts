@@ -142,8 +142,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ? payload.produced_by.trim()
     : "cc-index-artifacts";
   const prune = payload.prune === true;
+  const force = payload.force === true;
 
   if (!Array.isArray(payload.items)) return bad("items must be an array");
+  if (prune && payload.items.length < 5 && !force) {
+    return bad(`Refusing to prune with ${payload.items.length} items (< 5). Pass force=true to override.`);
+  }
 
   const nowIso = new Date().toISOString();
   const errors: Array<{ path: string | null; error: string }> = [];
@@ -161,8 +165,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       itemPath = item.path;
       scanPaths.add(item.path);
 
+      // Prefer active row when duplicate historical rows exist for the same path.
+      // nullsfirst ensures deleted_at=null (active) wins over soft-deleted rows.
       const existing = await cpGet(
-        `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&limit=1`,
+        `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&order=deleted_at.asc.nullsfirst&limit=1`,
       );
 
       const existingFirst = existing[0];
@@ -199,7 +205,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         } catch (insertError) {
           if (!isUniqueViolationError(insertError)) throw insertError;
           const concurrent = await cpGet(
-            `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&limit=1`,
+            `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&order=deleted_at.asc.nullsfirst&limit=1`,
           );
           const concurrentFirst = concurrent[0];
           const concurrentId = isRecord(concurrentFirst) ? asString(concurrentFirst.id) : null;
