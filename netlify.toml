@@ -1,0 +1,11 @@
+# Netlify deploy config for the Command Center web app.
+# The app lives in web/; paths below are relative to that base.
+[build]
+  base = "web"
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

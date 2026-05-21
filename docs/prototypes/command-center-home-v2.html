@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BlackRock AI Command Center</title>
+<!--
+  ============================================================================
+  BlackRock AI Command Center — Home + Shell  (v2, fully wired)
+
+  WIRE-UP MAP — every backend connection this screen makes:
+    apps         <- v_command_center_home        view   (strip, Band 1, Band 2)
+    activity     <- cc_audit_events               table  (Band 3)
+    momentum     <- registry_app_snapshots        table  (per-card delta)
+    integrations <- registry_app_integrations     table  (per-card health)
+    session      <- supabase.auth                        (login gate)
+    deep links   -> app.app_url  [needs registry column registry_apps.app_url]
+
+  DEMO_MODE (CFG below) defaults true: renders sample rows, works offline.
+  Flip to false to read the live control plane (gsvhuzpysxaegoecwjmf).
+  Every value on screen traces to a column — nothing is invented.
+  ============================================================================
+-->
+<style>
+  :root{
+    --bg:#0A0C12; --panel:#0F121B; --card:#161A26; --card-2:#1B2030; --card-3:#21283A;
+    --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12);
+    --text:#E7E9F0; --text-2:#9099AD; --text-3:#5C6478;
+    --accent:#7C6FF0;
+    --red:#FF5C73; --amber:#F5A623; --blue:#4F9CF0; --green:#3DD68C; --grey:#6B7280;
+    --r:14px; font-synthesis:none;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:14px;line-height:1.45}
+  button{font-family:inherit}
+  .hidden{display:none!important}
+
+  /* ============ LOGIN ============ */
+  .auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+  .auth-card{width:100%;max-width:380px;background:var(--panel);border:1px solid var(--line);
+    border-radius:18px;padding:32px}
+  .auth-brand{display:flex;align-items:center;gap:11px;margin-bottom:22px}
+  .auth-h{font-size:19px;font-weight:700;letter-spacing:-.2px}
+  .auth-p{font-size:13px;color:var(--text-3);margin:-2px 0 22px}
+  .field{margin-bottom:13px}
+  .field label{display:block;font-size:11px;letter-spacing:.4px;text-transform:uppercase;
+    color:var(--text-3);margin-bottom:6px;font-weight:600}
+  .field input{width:100%;background:var(--card);border:1px solid var(--line-2);border-radius:9px;
+    padding:11px 12px;color:var(--text);font-size:14px;font-family:inherit}
+  .field input:focus{outline:none;border-color:var(--accent)}
+  .btn-primary{width:100%;background:var(--accent);border:none;border-radius:9px;padding:12px;
+    color:#fff;font-weight:700;font-size:14px;cursor:pointer;margin-top:6px}
+  .btn-primary:hover{filter:brightness(1.08)}
+  .auth-err{background:rgba(255,92,115,.12);border:1px solid rgba(255,92,115,.3);
+    color:#FF8092;font-size:12.5px;border-radius:8px;padding:9px 11px;margin-bottom:13px}
+  .auth-note{font-size:11.5px;color:var(--text-3);margin-top:16px;text-align:center}
+  .linklike{color:var(--accent);cursor:pointer;text-decoration:none}
+  .linklike:hover{text-decoration:underline}
+
+  /* ============ SHELL ============ */
+  .shell{display:flex;min-height:100vh}
+  .rail{width:236px;flex:none;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;padding:20px 14px;gap:24px;transition:width .18s ease}
+  .rail.collapsed{width:64px}
+  .brand{display:flex;align-items:center;gap:10px;padding:4px 6px}
+  .brand-mark{width:30px;height:30px;flex:none;border-radius:8px;
+    background:linear-gradient(135deg,var(--accent),#4F9CF0);
+    display:flex;align-items:center;justify-content:center}
+  .brand-name{font-weight:700;font-size:14px;white-space:nowrap}
+  .brand-sub{font-size:9.5px;letter-spacing:1.6px;color:var(--text-3);font-weight:600}
+  .rail.collapsed .brand-text,.rail.collapsed .nav-label,
+  .rail.collapsed .nav-stub,.rail.collapsed .rail-foot-label{display:none}
+  nav{display:flex;flex-direction:column;gap:3px}
+  .nav-item{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px;
+    color:var(--text-2);cursor:pointer;font-weight:500;white-space:nowrap}
+  .nav-item svg{flex:none}
+  .nav-item:hover{background:rgba(255,255,255,.04);color:var(--text)}
+  .nav-item.active{background:rgba(124,111,240,.14);color:#CFC9FF}
+  .nav-item.active svg{stroke:var(--accent)}
+  .nav-stub{font-size:10px;color:var(--text-3);margin-left:auto;font-weight:600}
+  .rail-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+  .collapse-btn{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;
+    background:transparent;border:1px solid var(--line);color:var(--text-2);cursor:pointer;font-size:12.5px}
+  .collapse-btn:hover{border-color:var(--line-2);color:var(--text)}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .topbar{display:flex;align-items:center;gap:14px;padding:16px 28px;border-bottom:1px solid var(--line)}
+  .page-title{font-size:20px;font-weight:700;letter-spacing:-.2px}
+  .topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .mode-pill{display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:999px;
+    background:var(--card);border:1px solid var(--line);font-size:11.5px;color:var(--text-2)}
+  .fresh-pill{display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:999px;
+    background:var(--card);border:1px solid var(--line);font-size:12.5px;color:var(--text-2)}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .refresh{display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:9px;
+    background:var(--card);border:1px solid var(--line);color:var(--text);cursor:pointer;font-size:12.5px}
+  .refresh:hover{border-color:var(--line-2)}
+  .refresh.spin svg{animation:spin .7s linear}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .operator{display:flex;align-items:center;gap:9px;padding:5px 10px 5px 5px;
+    border-radius:999px;background:var(--card);border:1px solid var(--line);cursor:pointer}
+  .avatar{width:28px;height:28px;border-radius:50%;flex:none;background:linear-gradient(135deg,#7C6FF0,#4F9CF0);
+    display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff}
+  .operator-name{font-size:12.5px;font-weight:600;line-height:1.1}
+  .operator-role{font-size:10.5px;color:var(--text-3)}
+
+  .content{padding:20px 28px 44px;display:flex;flex-direction:column;gap:16px;max-width:1340px;width:100%}
+
+  /* ============ PORTFOLIO STRIP ============ */
+  .strip{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+  .strip .cell{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+  .strip .ck{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--text-3)}
+  .strip .cv{font-size:22px;font-weight:700;margin-top:3px;letter-spacing:-.3px}
+  .strip .cv small{font-size:12px;color:var(--text-3);font-weight:600}
+  .strip .cv.red{color:var(--red)} .strip .cv.amber{color:var(--amber)} .strip .cv.green{color:var(--green)}
+
+  /* ============ BAND ============ */
+  .band{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+  .band-head{display:flex;align-items:center;gap:12px;padding:15px 18px}
+  .band-num{width:24px;height:24px;border-radius:7px;background:var(--card-2);display:flex;
+    align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text-2);flex:none}
+  .band-title{font-size:15px;font-weight:700}
+  .band-sub{font-size:12px;color:var(--text-3)}
+  .count-chip{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;
+    background:rgba(124,111,240,.16);color:#CFC9FF}
+  .band-action{margin-left:auto}
+  .ghost-btn{display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;
+    background:transparent;border:1px solid var(--line);color:var(--text-2);cursor:pointer;font-size:12px}
+  .ghost-btn:hover{border-color:var(--line-2);color:var(--text)}
+
+  /* triage */
+  .triage-row{display:flex;align-items:center;gap:14px;padding:13px 18px;
+    border-top:1px solid var(--line);position:relative}
+  .triage-row::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+  .triage-row.critical::before{background:var(--red)}
+  .triage-row.needs::before{background:var(--amber)}
+  .triage-row.watch::before{background:var(--blue)}
+  .rank{width:18px;text-align:center;color:var(--text-3);font-size:13px;font-weight:700;flex:none}
+  .badge{width:38px;height:38px;border-radius:10px;flex:none;display:flex;align-items:center;
+    justify-content:center;font-weight:800;font-size:13px;color:#fff}
+  .triage-text{flex:1;min-width:0}
+  .triage-title{font-size:13.5px;font-weight:600}
+  .triage-sub{font-size:12px;color:var(--text-3);margin-top:1px}
+  .sev{font-size:10.5px;font-weight:800;letter-spacing:.5px;padding:4px 9px;border-radius:6px;flex:none}
+  .sev.critical{background:rgba(255,92,115,.14);color:#FF8092}
+  .sev.needs{background:rgba(245,166,35,.14);color:#FFC061}
+  .sev.watch{background:rgba(79,156,240,.14);color:#82BCF7}
+  .act-btn{padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+    border:1px solid var(--line-2);background:var(--card-2);color:var(--text);flex:none}
+  .act-btn:hover{border-color:var(--accent)}
+  .triage-empty{padding:34px 18px;text-align:center;border-top:1px solid var(--line)}
+  .triage-empty .big{font-size:14px;font-weight:600;color:var(--green)}
+  .triage-empty .small{font-size:12.5px;color:var(--text-3);margin-top:3px}
+
+  /* projects grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:2px 18px 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px;
+    display:flex;flex-direction:column}
+  .card-head{display:flex;align-items:center;gap:11px}
+  .card-name{font-size:14px;font-weight:700;line-height:1.15}
+  .card-client{font-size:11.5px;color:var(--text-3)}
+  .pill{font-size:10px;font-weight:700;letter-spacing:.4px;padding:3px 8px;border-radius:6px;margin-left:auto;flex:none}
+  .pill.active{background:rgba(61,214,140,.13);color:#67E0A6}
+  .pill.paused{background:rgba(107,114,128,.18);color:#9CA3B4}
+  .pill.provisioning{background:rgba(79,156,240,.14);color:#82BCF7}
+  .pill.archived{background:rgba(107,114,128,.18);color:#9CA3B4}
+  .sample-tag{font-size:9px;font-weight:700;letter-spacing:.6px;color:var(--text-3);
+    border:1px solid var(--line-2);padding:2px 6px;border-radius:5px;margin-left:8px}
+  .card-sep{height:1px;background:var(--line);margin:13px 0}
+  .row2{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+  .row2 .k{color:var(--text-3)}
+  .row2 + .row2{margin-top:8px}
+  .health{display:flex;align-items:center;gap:7px;font-weight:600;font-size:12.5px}
+  .prog-top{display:flex;justify-content:space-between;align-items:baseline;margin:13px 0 6px}
+  .prog-label{font-size:11.5px;color:var(--text-3)}
+  .prog-val{font-size:12px;color:var(--text-2)}
+  .prog-val b{color:var(--text);font-weight:700}
+  .bar{height:7px;border-radius:5px;background:var(--card-2);overflow:hidden}
+  .bar > i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,#7C6FF0,#4F9CF0)}
+  .prog-foot{display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px}
+  .delta{font-weight:700}
+  .delta.up{color:var(--green)} .delta.flat{color:var(--text-3)}
+  .card-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:13px}
+  .stat{background:var(--card-2);border-radius:8px;padding:9px 10px}
+  .stat .sk{font-size:10px;color:var(--text-3);letter-spacing:.3px;text-transform:uppercase}
+  .stat .sv{font-size:16px;font-weight:700;margin-top:2px}
+  .stat .sv.red{color:var(--red)} .stat .sv.amber{color:var(--amber)}
+  .stat .sv.green{color:var(--green)} .stat .sv.muted{color:var(--text-3)}
+  .card-foot{margin-top:13px;display:flex;align-items:center}
+  .open-link{font-size:12px;color:var(--accent);cursor:pointer;display:flex;align-items:center;gap:5px}
+  .open-link:hover{text-decoration:underline}
+  .card-prov{margin-top:13px;padding:18px;border:1px dashed var(--line-2);border-radius:9px;
+    text-align:center;font-size:12px;color:var(--text-3)}
+
+  /* activity feed (Band 3) */
+  .feed{display:flex;flex-direction:column}
+  .feed-row{display:flex;align-items:center;gap:12px;padding:11px 18px;border-top:1px solid var(--line)}
+  .feed-ico{width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;
+    justify-content:center;background:var(--card-2)}
+  .feed-text{flex:1;min-width:0}
+  .feed-title{font-size:12.5px;font-weight:500}
+  .feed-meta{font-size:11px;color:var(--text-3);margin-top:1px}
+  .feed-time{font-size:11px;color:var(--text-3);flex:none}
+  .feed-empty{padding:28px;text-align:center;font-size:12.5px;color:var(--text-3);border-top:1px solid var(--line)}
+
+  /* loading skeleton */
+  .skel{background:linear-gradient(90deg,var(--card) 25%,var(--card-2) 50%,var(--card) 75%);
+    background-size:400% 100%;animation:sh 1.3s ease infinite;border-radius:8px}
+  @keyframes sh{0%{background-position:100% 0}100%{background-position:-100% 0}}
+
+  /* error state */
+  .err-wrap{padding:60px 24px;text-align:center}
+  .err-ico{width:52px;height:52px;border-radius:50%;margin:0 auto 14px;
+    background:rgba(255,92,115,.12);display:flex;align-items:center;justify-content:center}
+  .err-h{font-size:16px;font-weight:700}
+  .err-p{font-size:13px;color:var(--text-3);margin:6px auto 18px;max-width:440px}
+  .err-detail{font-size:11.5px;color:var(--text-3);font-family:ui-monospace,Menlo,monospace;
+    background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;
+    max-width:520px;margin:0 auto 18px;word-break:break-all}
+
+  @media(max-width:820px){
+    .strip{grid-template-columns:repeat(3,1fr)}
+  }
+  @media(max-width:760px){
+    .rail{display:none}
+    .topbar{padding:13px 16px;flex-wrap:wrap}
+    .content{padding:16px 16px 32px}
+    .operator-name,.operator-role,.mode-pill span{display:none}
+    .triage-row{flex-wrap:wrap}
+    .act-btn{margin-left:52px}
+    .grid{grid-template-columns:1fr;padding:2px 14px 16px}
+    .strip{grid-template-columns:repeat(2,1fr)}
+  }
+</style>
+</head>
+<body>
+
+<!-- ===================== VIEW: LOGIN ===================== -->
+<div id="view-login" class="auth-wrap hidden">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="brand-mark"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3h10v4H7v6H3V3z" fill="#fff"/></svg></div>
+      <div><div class="auth-h">Command Center</div></div>
+    </div>
+    <div class="auth-p">Sign in to the BlackRock AI control plane.</div>
+    <div id="loginErr" class="auth-err hidden"></div>
+    <div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username" placeholder="you@blackrockai.co" /></div>
+    <div class="field"><label>Password</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••" /></div>
+    <button class="btn-primary" id="loginBtn" onclick="doLogin()">Sign in</button>
+    <div class="auth-note">
+      Operator access only · MFA enforced.<br/>
+      <a class="linklike" onclick="useDemo()">Continue with demo data</a>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== VIEW: APP (shell) ===================== -->
+<div id="view-app" class="shell hidden">
+  <aside class="rail" id="rail">
+    <div class="brand">
+      <div class="brand-mark"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3h10v4H7v6H3V3z" fill="#fff"/></svg></div>
+      <div class="brand-text"><div class="brand-name">BlackRock AI</div><div class="brand-sub">COMMAND CENTER</div></div>
+    </div>
+    <nav>
+      <div class="nav-item active" onclick="stub('Home')">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span class="nav-label">Home</span></div>
+      <div class="nav-item" onclick="stub('Decisions')">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="nav-label">Decisions</span><span class="nav-stub">soon</span></div>
+      <div class="nav-item" onclick="stub('Agents')">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M9 14h.01M15 14h.01"/></svg><span class="nav-label">Agents</span><span class="nav-stub">soon</span></div>
+      <div class="nav-item" onclick="stub('Apps')">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Apps</span><span class="nav-stub">soon</span></div>
+      <div class="nav-item" onclick="stub('Settings')">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.61.78 1 1.42 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="nav-label">Settings</span><span class="nav-stub">soon</span></div>
+    </nav>
+    <div class="rail-foot">
+      <button class="collapse-btn" onclick="document.getElementById('rail').classList.toggle('collapsed')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="rail-foot-label">Collapse</span></button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="page-title">Home</div>
+      <div class="topbar-right">
+        <div class="mode-pill" id="modePill"><span class="dot" style="background:var(--amber)"></span><span id="modeText">Demo data</span></div>
+        <div class="fresh-pill"><span class="dot" style="background:var(--green)"></span><span id="freshText">—</span></div>
+        <button class="refresh" id="refreshBtn" onclick="refresh()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh</button>
+        <div class="operator" onclick="signOut()" title="Sign out">
+          <div class="avatar" id="opInitials">BL</div>
+          <div><div class="operator-name" id="opName">Brian Lewis</div><div class="operator-role">Operator</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="content" id="content"><!-- rendered by render() / loading / error --></div>
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   CONFIG
+   ================================================================ */
+const CFG = {
+  SUPABASE_URL: "https://gsvhuzpysxaegoecwjmf.supabase.co",
+  SUPABASE_PUBLISHABLE_KEY: "sb_publishable_NUCBIao37hJ_ynvlez9BWQ_noaCVkyz",
+  DEMO_MODE: true            // ← false = read the live control plane
+};
+
+/* ================================================================
+   DEMO SEED — exact shapes of the backend objects.
+   apps[]   mirrors  v_command_center_home  (+ app_url, integrations, momentum
+            which are merged in from registry_app_integrations /
+            registry_app_snapshots in live mode).
+   ================================================================ */
+const now = Date.now();
+const isoAgo = m => new Date(now - m*60000).toISOString();
+
+const DEMO_APPS = [
+  { /* ---- LIVE, real current numbers ---- */
+    id:"qep", short_code:"QEP", display_name:"QEP OS",
+    client_name:"Quality Equipment & Parts, Inc.",
+    app_url:"https://qep.blackrockai.co",
+    status:"active", lifecycle_phase:"build", criticality:100, sample:false,
+    last_snapshot_at: isoAgo(8), build_status:"green",
+    roadmap_counts:{shipped:57,in_progress:20,not_started:50,blocked:27,pending_decision:15,deferred:5},
+    decision_counts:{open:7,answered:13},
+    sync_health:{total_tasks:174,mirrored_tasks:171,error_count:0,pending_count:3,stale_pending_count:0},
+    integrations:{live:0,demo:0,manual_safe:0,planned:7},
+    momentum:{shipped_delta:3}
+  },
+  { id:"scc", short_code:"SCC", display_name:"SCC", client_name:"—",
+    app_url:null, status:"active", lifecycle_phase:"build", criticality:80, sample:true,
+    last_snapshot_at: isoAgo(4), build_status:"yellow",
+    roadmap_counts:{shipped:41,in_progress:12,not_started:33,blocked:14,pending_decision:9,deferred:3},
+    decision_counts:{open:3,answered:8},
+    sync_health:{total_tasks:112,mirrored_tasks:104,error_count:2,pending_count:6,stale_pending_count:0},
+    integrations:{live:1,demo:0,manual_safe:0,planned:4},
+    momentum:{shipped_delta:1}
+  },
+  { id:"col", short_code:"COL", display_name:"Circle of Life", client_name:"—",
+    app_url:null, status:"paused", lifecycle_phase:"build", criticality:60, sample:true,
+    last_snapshot_at: isoAgo(300), build_status:"green",
+    roadmap_counts:{shipped:28,in_progress:6,not_started:40,blocked:8,pending_decision:4,deferred:2},
+    decision_counts:{open:2,answered:5},
+    sync_health:{total_tasks:88,mirrored_tasks:88,error_count:0,pending_count:0,stale_pending_count:0},
+    integrations:{live:2,demo:0,manual_safe:0,planned:3},
+    momentum:{shipped_delta:0}
+  },
+  { id:"fnd", short_code:"FND", display_name:"Foundry", client_name:"—",
+    app_url:null, status:"provisioning", lifecycle_phase:"discovery", criticality:40, sample:true,
+    last_snapshot_at: null, build_status:"unknown",
+    roadmap_counts:{}, decision_counts:{}, sync_health:{},
+    integrations:{}, momentum:{}
+  }
+];
+
+/* DEMO activity — exact shape of cc_audit_events rows */
+const DEMO_ACTIVITY = [
+  {occurred_at:isoAgo(8),  short_code:"QEP", actor:"aggregator", event_type:"snapshot_captured", detail:{build_status:"green"}},
+  {occurred_at:isoAgo(4),  short_code:"SCC", actor:"aggregator", event_type:"snapshot_captured", detail:{build_status:"yellow"}},
+  {occurred_at:isoAgo(4),  short_code:"FND", actor:"aggregator", event_type:"snapshot_failed",   detail:{error:"control-plane secret 'SVC_KEY_FND' is not set"}},
+  {occurred_at:isoAgo(68), short_code:"QEP", actor:"aggregator", event_type:"snapshot_captured", detail:{build_status:"green"}},
+  {occurred_at:isoAgo(128),short_code:"QEP", actor:"blewis@lewisinsurance.com", event_type:"app_provisioned", detail:{short_code:"QEP"}},
+  {occurred_at:isoAgo(190),short_code:"SCC", actor:"aggregator", event_type:"snapshot_captured", detail:{build_status:"yellow"}}
+];
+
+const COLOR = {QEP:"#7C6FF0", SCC:"#4F9CF0", COL:"#3DD68C", FND:"#F5A623"};
+
+/* ================================================================
+   DATA LAYER — one named loader per backend source.
+   Each: returns DEMO data when CFG.DEMO_MODE, else the live query.
+   ================================================================ */
+let _sb = null;
+async function sb(){
+  if(_sb) return _sb;
+  const {createClient} = await import("https://esm.sh/@supabase/supabase-js@2");
+  _sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_PUBLISHABLE_KEY);
+  return _sb;
+}
+
+/* SOURCE 1 — v_command_center_home (+ merge integrations & momentum) */
+async function loadApps(){
+  if(CFG.DEMO_MODE) return structuredClone(DEMO_APPS);
+  const c = await sb();
+  const {data, error} = await c.from("v_command_center_home").select("*");
+  if(error) throw new Error("v_command_center_home: "+error.message);
+  const integ = await loadIntegrations();
+  const mom   = await loadMomentum();
+  return data.map(a => ({
+    ...a,
+    app_url: a.app_url || null,                    /* WIRE-UP: add registry_apps.app_url */
+    integrations: integ[a.id] || {},
+    momentum:     mom[a.id]   || {}
+  }));
+}
+
+/* SOURCE 2 — cc_audit_events  (Band 3) */
+async function loadActivity(){
+  if(CFG.DEMO_MODE) return structuredClone(DEMO_ACTIVITY);
+  const c = await sb();
+  const {data, error} = await c
+    .from("cc_audit_events")
+    .select("occurred_at,actor,event_type,detail,app_id")
+    .order("occurred_at",{ascending:false}).limit(20);
+  if(error) throw new Error("cc_audit_events: "+error.message);
+  return data;
+}
+
+/* SOURCE 3 — registry_app_snapshots  (per-app momentum: shipped delta) */
+async function loadMomentum(){
+  if(CFG.DEMO_MODE) return {};
+  const c = await sb();
+  const {data, error} = await c
+    .from("registry_app_snapshots")
+    .select("app_id,captured_at,roadmap_counts")
+    .order("captured_at",{ascending:false}).limit(200);
+  if(error) throw new Error("registry_app_snapshots: "+error.message);
+  const byApp={};
+  for(const r of data){ (byApp[r.app_id]=byApp[r.app_id]||[]).push(r); }
+  const out={};
+  for(const id in byApp){
+    const s=byApp[id];
+    const cur=(s[0]?.roadmap_counts||{}).shipped||0;
+    const prev=(s[1]?.roadmap_counts||{}).shipped??cur;
+    out[id]={shipped_delta:cur-prev};
+  }
+  return out;
+}
+
+/* SOURCE 4 — registry_app_integrations  (per-app integration health) */
+async function loadIntegrations(){
+  if(CFG.DEMO_MODE) return {};
+  const c = await sb();
+  const {data, error} = await c
+    .from("registry_app_integrations").select("app_id,status");
+  if(error) throw new Error("registry_app_integrations: "+error.message);
+  const out={};
+  for(const r of data){
+    out[r.app_id]=out[r.app_id]||{live:0,demo:0,manual_safe:0,planned:0};
+    if(out[r.app_id][r.status]!=null) out[r.app_id][r.status]++;
+  }
+  return out;
+}
+
+/* ================================================================
+   AUTH  (supabase.auth)
+   ================================================================ */
+async function doLogin(){
+  const email=document.getElementById("loginEmail").value.trim();
+  const pass =document.getElementById("loginPass").value;
+  const errEl=document.getElementById("loginErr");
+  const btn  =document.getElementById("loginBtn");
+  errEl.classList.add("hidden");
+  if(!email||!pass){ errEl.textContent="Enter an email and password."; errEl.classList.remove("hidden"); return; }
+  btn.textContent="Signing in…"; btn.disabled=true;
+  try{
+    const c=await sb();
+    const {data,error}=await c.auth.signInWithPassword({email,password:pass});
+    if(error) throw error;
+    CFG.DEMO_MODE=false;
+    OPERATOR=email;
+    await enterApp();
+  }catch(e){
+    errEl.textContent=e.message||"Sign-in failed."; errEl.classList.remove("hidden");
+  }finally{ btn.textContent="Sign in"; btn.disabled=false; }
+}
+async function signOut(){
+  if(!CFG.DEMO_MODE){ try{ const c=await sb(); await c.auth.signOut(); }catch(e){} }
+  showView("login");
+}
+function useDemo(){ CFG.DEMO_MODE=true; OPERATOR=null; enterApp(); }
+
+/* ================================================================
+   VIEW STATE
+   ================================================================ */
+let OPERATOR=null, STATE={apps:[],activity:[]};
+function showView(v){
+  document.getElementById("view-login").classList.toggle("hidden", v!=="login");
+  document.getElementById("view-app").classList.toggle("hidden", v!=="app");
+}
+function stub(name){ /* WIRE-UP: route to /"+name.toLowerCase() */ alert(name+" — section not built yet (Phase: home + shell)."); }
+
+/* ---------- helpers ---------- */
+const sum = o => Object.values(o||{}).reduce((a,b)=>a+(+b||0),0);
+function ago(s){
+  if(!s) return null;
+  const m=Math.round((Date.now()-new Date(s))/60000);
+  if(m<1) return "just now";
+  if(m<60) return m+"m ago";
+  const h=Math.round(m/60); if(h<24) return h+"h ago";
+  return Math.round(h/24)+"d ago";
+}
+const hoursOld = s => s ? (Date.now()-new Date(s))/3600000 : null;
+const esc = s => String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+/* ================================================================
+   TRIAGE — derived from aggregate signals only (no item-level data)
+   ================================================================ */
+function deriveTriage(app){
+  const out=[], rc=app.roadmap_counts||{}, dc=app.decision_counts||{}, sh=app.sync_health||{};
+  const old=hoursOld(app.last_snapshot_at);
+  if(app.status==="paused"||app.status==="archived") return out;
+  if(app.build_status==="red")
+    out.push({sev:"critical",title:app.display_name+" build is failing",sub:"Build health is red",act:"Open app"});
+  if((sh.error_count||0)>0)
+    out.push({sev:"critical",title:app.display_name+" — Linear sync has "+sh.error_count+" error"+(sh.error_count>1?"s":""),
+              sub:"Sync failed for tracked work items",act:"Check sync"});
+  if(app.status==="active" && old!=null && old>3)
+    out.push({sev:"critical",title:app.display_name+" — no data in "+Math.round(old)+"h",
+              sub:"The Aggregator has not received a snapshot",act:"Open app"});
+  if((dc.open||0)>0)
+    out.push({sev:"needs",title:app.display_name+" — "+dc.open+" decision"+(dc.open>1?"s":"")+" waiting on answers",
+              sub:"Answering these clears "+(rc.pending_decision||0)+" blocked task"+((rc.pending_decision||0)===1?"":"s"),act:"Open decisions"});
+  if(app.build_status==="yellow")
+    out.push({sev:"needs",title:app.display_name+" build needs a look",sub:"Build health is yellow",act:"View build"});
+  if((rc.blocked||0)>0)
+    out.push({sev:"watch",title:app.display_name+" — "+rc.blocked+" item"+(rc.blocked>1?"s":"")+" blocked",
+              sub:"Blocked work items need review",act:"Review blockers"});
+  if((sh.stale_pending_count||0)>0)
+    out.push({sev:"watch",title:app.display_name+" — "+sh.stale_pending_count+" items haven't synced",
+              sub:"Roadmap items pending sync to Linear",act:"Check sync"});
+  return out.map(i=>({...i,app}));
+}
+const SEV_RANK={critical:0,needs:1,watch:2};
+const SEV_LABEL={critical:"CRITICAL",needs:"NEEDS YOU",watch:"WATCH"};
+const HEALTH={green:{c:"var(--green)",t:"Healthy"},yellow:{c:"var(--amber)",t:"Needs attention"},
+  red:{c:"var(--red)",t:"Failing"},unknown:{c:"var(--grey)",t:"No signal"}};
+
+/* ---------- activity-line builder (cc_audit_events -> human text) ---------- */
+function activityLine(ev){
+  const d=ev.detail||{};
+  if(ev.event_type==="snapshot_captured") return ["Snapshot captured","build "+(d.build_status||"?")];
+  if(ev.event_type==="snapshot_failed")   return ["Snapshot failed", d.error||"unknown error"];
+  if(ev.event_type==="app_provisioned")   return ["Registered as a Command Center app", "by "+ev.actor];
+  if(ev.event_type==="secret_read")       return ["Secret retrieved", "by "+ev.actor];
+  if(ev.event_type==="agent_dispatch")    return ["Agent dispatched", "by "+ev.actor];
+  return [ev.event_type, "by "+ev.actor];
+}
+
+/* ================================================================
+   RENDER
+   ================================================================ */
+function renderLoading(){
+  document.getElementById("content").innerHTML=`
+    <div class="strip">${'<div class="cell"><div class="skel" style="height:14px;width:60%"></div><div class="skel" style="height:22px;width:40%;margin-top:8px"></div></div>'.repeat(6)}</div>
+    <div class="band"><div class="band-head"><span class="band-num">1</span><div class="band-title">What needs you</div></div>
+      ${'<div style="padding:14px 18px;border-top:1px solid var(--line)"><div class="skel" style="height:38px"></div></div>'.repeat(3)}</div>
+    <div class="band"><div class="band-head"><span class="band-num">2</span><div class="band-title">Projects</div></div>
+      <div class="grid">${'<div class="skel" style="height:230px"></div>'.repeat(3)}</div></div>`;
+}
+function renderError(msg){
+  document.getElementById("content").innerHTML=`
+    <div class="band"><div class="err-wrap">
+      <div class="err-ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF8092" stroke-width="2" stroke-linecap="round"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg></div>
+      <div class="err-h">Couldn't reach the control plane</div>
+      <div class="err-p">The Home reads <b>v_command_center_home</b>. The query didn't return.</div>
+      <div class="err-detail">${esc(msg)}</div>
+      <button class="btn-primary" style="width:auto;padding:11px 22px" onclick="refresh()">Retry</button>
+      &nbsp;&nbsp;<a class="linklike" onclick="useDemo()">Use demo data</a>
+    </div></div>`;
+}
+
+function render(){
+  const apps=[...STATE.apps].sort((a,b)=>b.criticality-a.criticality);
+  const activity=STATE.activity||[];
+
+  /* triage */
+  let triage=[]; apps.forEach(a=>triage.push(...deriveTriage(a)));
+  triage.sort((a,b)=> SEV_RANK[a.sev]-SEV_RANK[b.sev] || b.app.criticality-a.app.criticality);
+
+  /* portfolio strip — all derived from apps[] */
+  const active=apps.filter(a=>a.status==="active").length;
+  const openDec=apps.reduce((n,a)=>n+((a.decision_counts||{}).open||0),0);
+  const blocked=apps.reduce((n,a)=>n+((a.roadmap_counts||{}).blocked||0),0);
+  const anyRed=apps.some(a=>a.build_status==="red");
+  const anyYel=apps.some(a=>a.build_status==="yellow");
+  const pf = anyRed?{t:"Attention",c:"red"}:anyYel?{t:"Watch",c:"amber"}:{t:"Good",c:"green"};
+
+  const strip=`<div class="strip">
+    <div class="cell"><div class="ck">Apps</div><div class="cv">${apps.length}</div></div>
+    <div class="cell"><div class="ck">Active</div><div class="cv">${active}</div></div>
+    <div class="cell"><div class="ck">Triage items</div><div class="cv ${triage.length?'amber':'green'}">${triage.length}</div></div>
+    <div class="cell"><div class="ck">Open decisions</div><div class="cv ${openDec?'amber':''}">${openDec}</div></div>
+    <div class="cell"><div class="ck">Blocked work</div><div class="cv ${blocked?'red':''}">${blocked}</div></div>
+    <div class="cell"><div class="ck">Portfolio health</div><div class="cv ${pf.c}" style="font-size:18px">${pf.t}</div></div>
+  </div>`;
+
+  /* Band 1 */
+  const band1=`<section class="band">
+    <div class="band-head"><span class="band-num">1</span>
+      <div><div class="band-title">What needs you</div><div class="band-sub">Severity-ranked triage across every app</div></div>
+      <span class="count-chip">${triage.length}</span>
+      <div class="band-action"><button class="ghost-btn" onclick="stub('Decisions')">View all decisions
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button></div>
+    </div>
+    ${ triage.length ? triage.map((t,i)=>`
+      <div class="triage-row ${t.sev}">
+        <div class="rank">${i+1}</div>
+        <div class="badge" style="background:${COLOR[t.app.short_code]||'#555'}">${esc(t.app.short_code[0])}</div>
+        <div class="triage-text">
+          <div class="triage-title">${esc(t.title)}</div>
+          <div class="triage-sub">${esc(t.sub)}${t.app.sample?" · sample":""}</div>
+        </div>
+        <div class="sev ${t.sev}">${SEV_LABEL[t.sev]}</div>
+        <button class="act-btn" onclick="openApp('${t.app.id}')">${esc(t.act)}</button>
+      </div>`).join("")
+      : `<div class="triage-empty"><div class="big">Nothing needs you</div>
+         <div class="small">Every connected app is green, fresh and unblocked.</div></div>` }
+  </section>`;
+
+  /* Band 2 */
+  const cards=apps.map(a=>{
+    const total=sum(a.roadmap_counts), shipped=(a.roadmap_counts||{}).shipped||0;
+    const pct=total?Math.round(shipped/total*100):0;
+    const h=HEALTH[a.build_status]||HEALTH.unknown;
+    const fresh=ago(a.last_snapshot_at), old=hoursOld(a.last_snapshot_at);
+    const freshClass=!fresh?"muted":(old>3?"red":old>1.5?"amber":"green");
+    const open=(a.decision_counts||{}).open||0, blk=(a.roadmap_counts||{}).blocked||0;
+    const ig=a.integrations||{}, igLive=ig.live||0, igTot=sum(ig);
+    const d=(a.momentum||{}).shipped_delta;
+    const deltaTxt = d==null?"" : d>0?`<span class="delta up">+${d} since last</span>`
+                     : d<0?`<span class="delta">${d} since last</span>` : `<span class="delta flat">no change</span>`;
+    const head=`<div class="card-head">
+        <div class="badge" style="background:${COLOR[a.short_code]||'#555'}">${esc(a.short_code[0])}</div>
+        <div><div class="card-name">${esc(a.display_name)}${a.sample?'<span class="sample-tag">SAMPLE</span>':''}</div>
+        <div class="card-client">${esc(a.client_name||"—")}</div></div>
+        <span class="pill ${a.status}">${a.status.toUpperCase()}</span></div>`;
+
+    if(a.status==="provisioning")
+      return `<div class="card">${head}
+        <div class="card-prov">Registered — awaiting first snapshot.<br>
+        It joins the board automatically once the Aggregator reaches it.</div></div>`;
+
+    return `<div class="card">${head}
+      <div class="card-sep"></div>
+      <div class="row2"><span class="k">Lifecycle</span><span style="text-transform:capitalize;font-weight:600">${esc(a.lifecycle_phase)}</span></div>
+      <div class="row2"><span class="k">Build health</span><span class="health"><span class="dot" style="background:${h.c}"></span>${h.t}</span></div>
+      <div class="row2"><span class="k">Integrations</span>
+        <span class="health"><span class="dot" style="background:${igLive?'var(--green)':'var(--grey)'}"></span>${igLive} live · ${igTot} total</span></div>
+      <div class="prog-top"><span class="prog-label">Roadmap progress</span>
+        <span class="prog-val"><b>${shipped}</b> / ${total} shipped</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="prog-foot"><span>${pct}% · ${total-shipped} remaining</span>${deltaTxt}</div>
+      <div class="card-stats">
+        <div class="stat"><div class="sk">Open decisions</div><div class="sv ${open?'amber':'muted'}">${open}</div></div>
+        <div class="stat"><div class="sk">Blocked work</div><div class="sv ${blk?'red':'muted'}">${blk}</div></div>
+        <div class="stat"><div class="sk">Last snapshot</div><div class="sv ${freshClass}" style="font-size:13px">${fresh||"—"}</div></div>
+      </div>
+      <div class="card-foot"><span class="open-link" onclick="openApp('${a.id}')">Open ${esc(a.short_code)}
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></span></div>
+    </div>`;
+  }).join("");
+  const band2=`<section class="band">
+    <div class="band-head"><span class="band-num">2</span>
+      <div><div class="band-title">Projects</div><div class="band-sub">Every registered app — health, progress, freshness</div></div>
+      <div class="band-action"><button class="ghost-btn" onclick="stub('Apps')">View all apps
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button></div>
+    </div>
+    <div class="grid">${cards}</div></section>`;
+
+  /* Band 3 — real activity feed from cc_audit_events */
+  const feed = activity.length ? activity.map(ev=>{
+    const [title,meta]=activityLine(ev);
+    const sc=ev.short_code||"—";
+    return `<div class="feed-row">
+      <div class="feed-ico"><div class="badge" style="width:24px;height:24px;font-size:10px;background:${COLOR[sc]||'#555'}">${esc(sc[0])}</div></div>
+      <div class="feed-text"><div class="feed-title">${esc(sc)} — ${esc(title)}</div><div class="feed-meta">${esc(meta)}</div></div>
+      <div class="feed-time">${ago(ev.occurred_at)||""}</div>
+    </div>`;
+  }).join("") : `<div class="feed-empty">No activity recorded yet.</div>`;
+  const band3=`<section class="band">
+    <div class="band-head"><span class="band-num">3</span>
+      <div><div class="band-title">Activity</div><div class="band-sub">Recent control-plane events — aggregator runs, snapshots, registrations</div></div>
+      <div class="band-action"><button class="ghost-btn" onclick="stub('Settings')">Audit log
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button></div>
+    </div>
+    <div class="feed">${feed}</div></section>`;
+
+  document.getElementById("content").innerHTML = strip+band1+band2+band3;
+
+  /* topbar */
+  const newest=apps.map(a=>a.last_snapshot_at).filter(Boolean).sort((a,b)=>new Date(b)-new Date(a))[0];
+  document.getElementById("freshText").textContent="Updated "+(ago(newest)||"—");
+}
+
+/* ---------- deep links ---------- */
+function openApp(id){
+  const a=STATE.apps.find(x=>x.id===id);
+  if(a && a.app_url){ window.open(a.app_url,"_blank"); }
+  else { alert((a?a.display_name:"This app")+" has no app_url set.\nWIRE-UP: add column registry_apps.app_url."); }
+}
+
+/* ================================================================
+   LOAD / REFRESH / BOOT
+   ================================================================ */
+async function loadAll(){
+  const [apps,activity]=await Promise.all([loadApps(),loadActivity()]);
+  STATE={apps,activity};
+}
+async function refresh(){
+  const btn=document.getElementById("refreshBtn");
+  btn.classList.add("spin");
+  try{ await loadAll(); render(); }
+  catch(e){ renderError(e.message||String(e)); }
+  finally{ setTimeout(()=>btn.classList.remove("spin"),700); }
+}
+async function enterApp(){
+  showView("app");
+  /* mode pill + operator */
+  document.getElementById("modeText").textContent = CFG.DEMO_MODE?"Demo data":"Live · control plane";
+  document.getElementById("modePill").firstElementChild.style.background =
+    CFG.DEMO_MODE?"var(--amber)":"var(--green)";
+  if(OPERATOR){
+    document.getElementById("opName").textContent=OPERATOR;
+    document.getElementById("opInitials").textContent=OPERATOR.slice(0,2).toUpperCase();
+  }
+  renderLoading();
+  try{ await loadAll(); render(); }
+  catch(e){ renderError(e.message||String(e)); }
+}
+async function boot(){
+  if(CFG.DEMO_MODE){ enterApp(); return; }
+  /* live: require a session */
+  try{
+    const c=await sb();
+    const {data}=await c.auth.getSession();
+    if(data.session){ OPERATOR=data.session.user.email; enterApp(); }
+    else showView("login");
+  }catch(e){ showView("login"); }
+}
+boot();
+</script>
+</body>
+</html>
