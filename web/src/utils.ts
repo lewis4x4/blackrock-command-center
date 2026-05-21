@@ -3,6 +3,11 @@
 export const INITIAL_DEMO =
   (import.meta.env.VITE_DEMO_MODE ?? 'true') !== 'false';
 
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
+export const FUNCTIONS_URL = (import.meta.env.VITE_CC_FUNCTIONS_URL ?? `${SUPABASE_URL}/functions/v1`).replace(/\/$/, '');
+export const READ_TOKEN = import.meta.env.VITE_CC_READ_TOKEN ?? '';
+export const ACCESS_REQUIRED = (import.meta.env.VITE_CC_ACCESS_REQUIRED ?? 'false') === 'true';
+
 export function sum(o: unknown): number {
   if (!o || typeof o !== 'object') return 0;
   return Object.values(o as Record<string, unknown>)

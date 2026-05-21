@@ -129,7 +129,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
           </svg>
         </div>
         <div className="err-h">Couldn't reach the control plane</div>
-        <div className="err-p">The Home reads <b>v_command_center_home</b>. The query didn't return.</div>
+        <div className="err-p">The Home reads the <b>cc-read-home</b> edge function.</div>
         <div className="err-detail">{message}</div>
         <button className="btn-primary" style={{ width: 'auto', padding: '11px 22px' }} onClick={onRetry}>
           Retry

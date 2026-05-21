@@ -1,21 +1,19 @@
 /* ============================================================================
    BlackRock AI Command Center — data layer
 
-   WIRE-UP MAP — every backend read the Home performs:
-     loadApps()         <- v_command_center_home      view   (strip, Band 1 & 2)
-     loadActivity()     <- cc_audit_events            table  (Band 3)
-     loadMomentum()     <- registry_app_snapshots     table  (per-card delta)
-     loadIntegrations() <- registry_app_integrations  table  (per-card health)
-     sb().auth                                               (login gate)
+   WIRE-UP MAP — every browser backend read:
+     loadApps()         <- cc-read-home       edge function (Home strip, Bands 1 & 2)
+     loadAppDetail()    <- cc-read-app        edge function (future cockpit drilldown)
+     loadActivity()     <- cc-read-audit      edge function (Band 3)
+     FilesView          <- cc-read-artifacts  edge function (Files surface)
 
-   DEMO mode (VITE_DEMO_MODE) returns sample rows and needs no backend.
-   Live mode reads the control plane (gsvhuzpysxaegoecwjmf).
-   Every value rendered traces to a column — nothing is invented.
+   DEMO mode (VITE_DEMO_MODE) returns sample Home rows and needs no backend.
+   Live mode reads the control-plane edge functions (gsvhuzpysxaegoecwjmf).
+   Every value rendered traces to a backend payload — nothing is invented.
    ============================================================================ */
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
+import { ACCESS_REQUIRED, ago, FUNCTIONS_URL, hoursOld, sum, colorFor, APP_COLOR, HEALTH, READ_TOKEN, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
 
-/* ───────────────────── Types — the v_command_center_home contract ───────── */
+/* ───────────────────── Types — the cc-read-home contract ───────────────── */
 export type BuildStatus = 'green' | 'yellow' | 'red' | 'unknown';
 export type AppStatus = 'provisioning' | 'active' | 'paused' | 'archived';
 export type LifecyclePhase = 'discovery' | 'build' | 'launched' | 'maintenance';
@@ -95,16 +93,6 @@ export interface TriageItem {
   app: AppRow;
 }
 
-/* ───────────────────── Config + Supabase client ─────────────────────────── */
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
-const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? '';
-
-let _sb: SupabaseClient | null = null;
-export function sb(): SupabaseClient {
-  if (!_sb) _sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-  return _sb;
-}
-
 /* ───────────────────── Demo seed — exact backend shapes ─────────────────── */
 const isoAgo = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -178,86 +166,145 @@ export const DEMO_ACTIVITY: ActivityEvent[] = [
 
 /* ───────────────────── Data loaders ─────────────────────────────────────── */
 
-/* SOURCE 1 — v_command_center_home (+ merge integrations & momentum). */
+type EdgeErrorBody = { error?: unknown; detail?: unknown };
+
+const APP_STATUSES = new Set<AppStatus>(['provisioning', 'active', 'paused', 'archived']);
+const LIFECYCLE_PHASES = new Set<LifecyclePhase>(['discovery', 'build', 'launched', 'maintenance']);
+const BUILD_STATUSES = new Set<BuildStatus>(['green', 'yellow', 'red', 'unknown']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function readHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (!ACCESS_REQUIRED && READ_TOKEN) headers['x-cc-read-token'] = READ_TOKEN;
+  return headers;
+}
+
+function cleanError(prefix: string, status: number, payload: unknown): Error {
+  const body: EdgeErrorBody = isRecord(payload) ? payload : {};
+  const parts = [asString(body.error), asString(body.detail)].filter(Boolean);
+  return new Error(parts.length ? `${prefix}: ${parts.join(': ')}` : `${prefix} returned ${status}`);
+}
+
+async function fetchJson(path: string, params?: URLSearchParams): Promise<unknown> {
+  const qs = params?.toString();
+  const url = `${FUNCTIONS_URL}/${path}${qs ? `?${qs}` : ''}`;
+  const res = await fetch(url, { method: 'GET', headers: readHeaders() });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError(path, res.status, payload);
+  return payload;
+}
+
+function parseIntegrations(value: unknown): Integrations {
+  const rec = asRecord(value);
+  return {
+    live: asNumber(rec.live) ?? undefined,
+    demo: asNumber(rec.demo) ?? undefined,
+    manual_safe: asNumber(rec.manual_safe) ?? undefined,
+    planned: asNumber(rec.planned) ?? undefined,
+  };
+}
+
+function parseMomentum(value: unknown): Momentum {
+  const rec = asRecord(value);
+  return { shipped_delta: asNumber(rec.shipped_delta) ?? undefined };
+}
+
+function parseAppRow(value: unknown): AppRow {
+  if (!isRecord(value)) throw new Error('cc-read-home payload contains an invalid app row');
+  const id = asString(value.id);
+  const shortCode = asString(value.short_code);
+  const displayName = asString(value.display_name);
+  const status = asString(value.status);
+  if (!id || !shortCode || !displayName || !status) throw new Error('cc-read-home app row is missing required fields');
+  if (!APP_STATUSES.has(status as AppStatus)) throw new Error(`cc-read-home app row has invalid status: ${status}`);
+
+  const lifecyclePhase = asString(value.lifecycle_phase);
+  const buildStatus = asString(value.build_status);
+  return {
+    ...(value as unknown as AppRow),
+    id,
+    short_code: shortCode,
+    display_name: displayName,
+    client_name: asString(value.client_name),
+    status: status as AppStatus,
+    lifecycle_phase: LIFECYCLE_PHASES.has(lifecyclePhase as LifecyclePhase) ? lifecyclePhase as LifecyclePhase : 'discovery',
+    criticality: asNumber(value.criticality) ?? 0,
+    last_snapshot_at: asString(value.last_snapshot_at),
+    build_status: BUILD_STATUSES.has(buildStatus as BuildStatus) ? buildStatus as BuildStatus : null,
+    roadmap_counts: asRecord(value.roadmap_counts) as RoadmapCounts,
+    decision_counts: asRecord(value.decision_counts) as DecisionCounts,
+    sync_health: asRecord(value.sync_health) as SyncHealth,
+    app_url: asString(value.app_url),
+    integrations: parseIntegrations(value.integrations),
+    momentum: parseMomentum(value.momentum),
+  };
+}
+
+function parseHomeResponse(value: unknown): AppRow[] {
+  if (!isRecord(value) || !Array.isArray(value.apps) || !asString(value.generated_at)) {
+    throw new Error('cc-read-home payload is invalid');
+  }
+  return value.apps.map(parseAppRow);
+}
+
+function parseActivityEvent(value: unknown): ActivityEvent {
+  if (!isRecord(value)) throw new Error('cc-read-audit payload contains an invalid event row');
+  const occurredAt = asString(value.occurred_at);
+  const actor = asString(value.actor);
+  const eventType = asString(value.event_type);
+  if (!occurredAt || !actor || !eventType) throw new Error('cc-read-audit event row is missing required fields');
+  return {
+    occurred_at: occurredAt,
+    actor,
+    event_type: eventType,
+    detail: isRecord(value.detail) ? value.detail : null,
+    app_id: asString(value.app_id) ?? undefined,
+    short_code: asString(value.short_code) ?? undefined,
+  };
+}
+
+function parseAuditResponse(value: unknown): ActivityEvent[] {
+  if (!isRecord(value) || !Array.isArray(value.events) || !asString(value.generated_at)) {
+    throw new Error('cc-read-audit payload is invalid');
+  }
+  return value.events.map(parseActivityEvent);
+}
+
+/* SOURCE 1 — cc-read-home (merged app strip/cards payload). */
 export async function loadApps(demo: boolean): Promise<AppRow[]> {
   if (demo) return structuredClone(DEMO_APPS);
-  const { data, error } = await sb().from('v_command_center_home').select('*');
-  if (error) throw new Error('v_command_center_home: ' + error.message);
-  const [integ, mom] = await Promise.all([loadIntegrations(), loadMomentum()]);
-  return (data as Record<string, unknown>[]).map((a) => ({
-    ...(a as unknown as AppRow),
-    integrations: integ[a.id as string] ?? {},
-    momentum: mom[a.id as string] ?? {},
-  }));
+  return parseHomeResponse(await fetchJson('cc-read-home'));
 }
 
-/* SOURCE 2 — cc_audit_events (Band 3 activity feed). */
+/* SOURCE 2 — cc-read-audit (Band 3 activity feed). */
 export async function loadActivity(demo: boolean): Promise<ActivityEvent[]> {
   if (demo) return structuredClone(DEMO_ACTIVITY).filter((ev) => latelyLine(ev)[1]);
-  /* Embed registry_apps so each event carries its app's short_code. */
-  const { data, error } = await sb()
-    .from('cc_audit_events')
-    .select('occurred_at,actor,event_type,detail,app_id,registry_apps(short_code)')
-    .in('event_type', [...LATELY_VISIBLE_EVENT_TYPES])
-    .or('event_type.neq.snapshot_captured,detail->>build_status.neq.green')
-    .order('occurred_at', { ascending: false })
-    .limit(20);
-  if (error) throw new Error('cc_audit_events: ' + error.message);
-  type ActivityRow = {
-    occurred_at: string;
-    actor: string;
-    event_type: string;
-    detail: Record<string, unknown> | null;
-    app_id?: string;
-    registry_apps?: { short_code?: string } | { short_code?: string }[] | null;
-  };
-  return (data as ActivityRow[]).map((r) => {
-    const registry = Array.isArray(r.registry_apps) ? r.registry_apps[0] : r.registry_apps;
-    return {
-      occurred_at: r.occurred_at,
-      actor: r.actor,
-      event_type: r.event_type,
-      detail: r.detail,
-      app_id: r.app_id,
-      short_code: registry?.short_code,
-    };
-  }).filter((ev) => latelyLine(ev)[1]);
+  const params = new URLSearchParams();
+  params.set('lately_only', 'true');
+  params.set('limit', '20');
+  return parseAuditResponse(await fetchJson('cc-read-audit', params));
 }
 
-/* SOURCE 3 — registry_app_snapshots (per-app shipped delta). */
-export async function loadMomentum(): Promise<Record<string, Momentum>> {
-  const { data, error } = await sb()
-    .from('registry_app_snapshots')
-    .select('app_id,captured_at,roadmap_counts')
-    .order('captured_at', { ascending: false })
-    .limit(200);
-  if (error) throw new Error('registry_app_snapshots: ' + error.message);
-  const byApp: Record<string, { roadmap_counts: RoadmapCounts }[]> = {};
-  for (const r of data as { app_id: string; roadmap_counts: RoadmapCounts }[]) {
-    (byApp[r.app_id] ??= []).push(r);
-  }
-  const out: Record<string, Momentum> = {};
-  for (const id of Object.keys(byApp)) {
-    const rows = byApp[id];
-    const cur = rows[0]?.roadmap_counts?.shipped ?? 0;
-    const prev = rows[1]?.roadmap_counts?.shipped ?? cur;
-    out[id] = { shipped_delta: cur - prev };
-  }
-  return out;
-}
-
-/* SOURCE 4 — registry_app_integrations (per-app integration health). */
-export async function loadIntegrations(): Promise<Record<string, Integrations>> {
-  const { data, error } = await sb()
-    .from('registry_app_integrations')
-    .select('app_id,status');
-  if (error) throw new Error('registry_app_integrations: ' + error.message);
-  const out: Record<string, Integrations> = {};
-  for (const r of data as { app_id: string; status: keyof Integrations }[]) {
-    const bucket = (out[r.app_id] ??= { live: 0, demo: 0, manual_safe: 0, planned: 0 });
-    if (r.status in bucket) bucket[r.status] = (bucket[r.status] ?? 0) + 1;
-  }
-  return out;
+/* SOURCE 3 — cc-read-app (future cockpit drilldown placeholder). */
+export async function loadAppDetail(appId: string): Promise<unknown> {
+  const params = new URLSearchParams();
+  params.set('app_id', appId);
+  return fetchJson('cc-read-app', params);
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */

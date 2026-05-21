@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { ago, INITIAL_DEMO } from './utils';
+import { ACCESS_REQUIRED, ago, FUNCTIONS_URL, INITIAL_DEMO, READ_TOKEN } from './utils';
 
 type ArtifactKind = 'doc' | 'migration' | 'edge_function' | 'spec' | 'report' | 'web_source' | 'script' | 'agent_output' | 'pull_request';
 type ArtifactSource = 'repo_scan' | 'agent_run' | 'manual';
@@ -40,10 +40,6 @@ export type FilesViewHandle = {
 
 const LOCAL_REPO = '/Users/brianlewis/Projects/blackrock-command-center';
 const PAGE_SIZE = 50;
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
-const FUNCTIONS_URL = (import.meta.env.VITE_CC_FUNCTIONS_URL ?? `${SUPABASE_URL}/functions/v1`).replace(/\/$/, '');
-const READ_TOKEN = import.meta.env.VITE_CC_READ_TOKEN ?? '';
-const ACCESS_REQUIRED = (import.meta.env.VITE_CC_ACCESS_REQUIRED ?? 'false') === 'true';
 
 const KIND_OPTIONS: { value: ArtifactKind | ''; label: string }[] = [
   { value: '', label: 'All' },
