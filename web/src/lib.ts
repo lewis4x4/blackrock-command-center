@@ -62,6 +62,30 @@ export interface ActivityEvent {
   short_code?: string;
 }
 
+// The DB-layer whitelist mirrors latelyLine()'s visible cases (§5.9 deck).
+// New visible event types must be added in BOTH places; new hidden types only
+// need to be omitted from this list. The client-side hide check stays as
+// defense-in-depth.
+export const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
+  'snapshot_captured',
+  'snapshot_failed',
+  'app_provisioned',
+  'decision_answered',
+  'decision_routed',
+  'decision_reply_received',
+  'work_order_created',
+  'agent_dispatched',
+  'agent_finished',
+  'agent_failed',
+  'agent_run_long',
+  'pr_ready',
+  'verification_failed',
+  'cost_ceiling_hit',
+  'runner_offline',
+  'handoff_created',
+  'artifact_index_failed',
+];
+
 export type TriageSev = 'critical' | 'needs' | 'watch';
 export interface TriageItem {
   sev: TriageSev;
@@ -174,11 +198,7 @@ export async function loadActivity(demo: boolean): Promise<ActivityEvent[]> {
   const { data, error } = await sb()
     .from('cc_audit_events')
     .select('occurred_at,actor,event_type,detail,app_id,registry_apps(short_code)')
-    // Hide routine events at the DB layer so the .limit(20) window is full of
-    // Lately-visible events. The §5.9 hide list lives in latelyLine() but each
-    // hidden type must also be filtered HERE to avoid starvation.
-    .neq('event_type', 'secret_read')
-    .neq('event_type', 'artifacts_indexed')
+    .in('event_type', [...LATELY_VISIBLE_EVENT_TYPES])
     .or('event_type.neq.snapshot_captured,detail->>build_status.neq.green')
     .order('occurred_at', { ascending: false })
     .limit(20);

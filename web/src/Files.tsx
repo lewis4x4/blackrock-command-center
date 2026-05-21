@@ -224,6 +224,10 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
     requestSeq.current = seq;
     setError('');
     setLoadMoreError('');
+    // Clear pagination state at the START of a filter refresh so the user
+    // can't apply the old cursor to the new filter set during inlineLoading.
+    setNextCursor(null);
+    setHasMore(false);
     if (initialLoaded) setInlineLoading(true);
     else setLoading(true);
     try {
@@ -354,7 +358,7 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
             {hasMore && (
               <div className="files-more-wrap">
                 {loadMoreError && <div className="files-more-error">{loadMoreError}</div>}
-                <button className="act-btn files-more" disabled={loadingMore} onClick={() => void loadMore()}>
+                <button className="act-btn files-more" disabled={loadingMore || loading || inlineLoading} onClick={() => void loadMore()}>
                   {loadingMore ? 'Loading…' : `Load ${PAGE_SIZE} more`}
                 </button>
               </div>
