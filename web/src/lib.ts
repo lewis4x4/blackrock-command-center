@@ -174,7 +174,11 @@ export async function loadActivity(demo: boolean): Promise<ActivityEvent[]> {
   const { data, error } = await sb()
     .from('cc_audit_events')
     .select('occurred_at,actor,event_type,detail,app_id,registry_apps(short_code)')
+    // Hide routine events at the DB layer so the .limit(20) window is full of
+    // Lately-visible events. The §5.9 hide list lives in latelyLine() but each
+    // hidden type must also be filtered HERE to avoid starvation.
     .neq('event_type', 'secret_read')
+    .neq('event_type', 'artifacts_indexed')
     .or('event_type.neq.snapshot_captured,detail->>build_status.neq.green')
     .order('occurred_at', { ascending: false })
     .limit(20);

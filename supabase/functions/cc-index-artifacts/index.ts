@@ -234,8 +234,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   if (prune) {
+    if (failed > 0 && payload.force !== true) {
+      const reason = `Refusing to prune: ${failed} item(s) failed validation. Pass force=true to override.`;
+      await cpInsert("cc_audit_events", {
+        actor: "cc-index-artifacts",
+        event_type: "prune_refused",
+        detail: { reason, failed, scan_paths_size: scanPaths.size },
+      }).catch(() => {
+        // audit best-effort
+      });
+      return bad(reason, 400);
+    }
     if (scanPaths.size < 5 && payload.force !== true) {
-      return bad(`Refusing to prune with ${scanPaths.size} validated paths (< 5). Pass force=true to override.`, 400);
+      const reason = `Refusing to prune with ${scanPaths.size} validated paths (< 5). Pass force=true to override.`;
+      await cpInsert("cc_audit_events", {
+        actor: "cc-index-artifacts",
+        event_type: "prune_refused",
+        detail: { reason, failed, scan_paths_size: scanPaths.size },
+      }).catch(() => {
+        // audit best-effort
+      });
+      return bad(reason, 400);
     }
     if (failed > 0) {
       console.warn(
