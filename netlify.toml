@@ -1,11 +1,40 @@
-# Netlify deploy config for the Command Center web app.
-# The app lives in web/; paths below are relative to that base.
+# S1 hardening for "Close the Exposure": prepare Netlify-hosted SPA to sit behind
+# Cloudflare Access without redirect/caching behavior that weakens Access gating.
+# Operator setup sequence: docs/CLOUDFLARE_ACCESS_SETUP.md
+
 [build]
   base = "web"
   command = "npm run build"
   publish = "dist"
 
+# SPA fallback — every path returns index.html.
+# 200 instead of 301/302 so the URL bar stays as-is for hash-router links
+# (#/files), and so a request that's been intercepted by Cloudflare Access
+# isn't redirected before the Access challenge can render.
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+# Security headers — applied to every response.
+# These run BEFORE Cloudflare Access in some configurations; harmless either way.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options    = "nosniff"
+    X-Frame-Options           = "DENY"
+    Referrer-Policy           = "strict-origin-when-cross-origin"
+    Permissions-Policy        = "camera=(), microphone=(), geolocation=()"
+    # CSP intentionally permissive on connect-src for both the raw Supabase
+    # Functions host AND the eventual Cloudflare Access-proxied path
+    # (../_/cc-functions/*). Tighten after Access lands.
+    Content-Security-Policy   = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co https://*.cloudflareaccess.com; font-src 'self'; frame-ancestors 'none';"
+    # No HTML caching — Access cookies are session-tied; cache MUST NOT
+    # leak an authorized HTML response to an unauthorized later request.
+    Cache-Control             = "no-store, max-age=0"
+
+# Fingerprinted Vite assets are safe for long-lived immutable caching.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
