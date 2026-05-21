@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import {
-  ago, sum, hoursOld, deriveTriage, SEV_RANK, SEV_LABEL, HEALTH, colorFor, activityLine,
+  ago, sum, hoursOld, deriveTriage, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone,
   type AppRow, type ActivityEvent, type TriageItem, type BuildStatus,
 } from './lib';
 
@@ -22,9 +22,13 @@ const chevron = (
 /* ============================================================================
    SHELL — left rail + topbar, wraps every view
    ============================================================================ */
-export function Shell({ demo, apps, onRefresh, children }: {
+export type ShellPage = 'home' | 'files';
+
+export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children }: {
   demo: boolean;
   apps: AppRow[];
+  activePage: ShellPage;
+  onNavigate: (page: ShellPage) => void;
   onRefresh: () => void | Promise<void>;
   children: ReactNode;
 }) {
@@ -47,7 +51,8 @@ export function Shell({ demo, apps, onRefresh, children }: {
     Decisions: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>,
     Agents: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="8" width="16" height="12" rx="2" /><path d="M12 8V4M9 14h.01M15 14h.01" /></svg>,
     Apps: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>,
-    Settings: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.61.78 1 1.42 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>,
+    Files: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z" /><path d="M8 13h8M8 16h5" /></svg>,
+    Settings: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06A2 2 0 1 1 22 7.09l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.61.78 1 1.42 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>,
   };
 
   return (
@@ -63,17 +68,21 @@ export function Shell({ demo, apps, onRefresh, children }: {
           </div>
         </div>
         <nav>
-          {(['Home', 'Decisions', 'Agents', 'Apps', 'Settings'] as const).map((name) => (
-            <button
-              key={name}
-              className={'nav-item' + (name === 'Home' ? ' active' : '')}
-              onClick={() => (name === 'Home' ? undefined : stub(name))}
-            >
-              {navIcons[name]}
-              <span className="nav-label">{name}</span>
-              {name !== 'Home' && <span className="nav-stub">soon</span>}
-            </button>
-          ))}
+          {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Settings'] as const).map((name) => {
+            const page = name === 'Home' ? 'home' : name === 'Files' ? 'files' : null;
+            const active = page === activePage;
+            return (
+              <button
+                key={name}
+                className={'nav-item' + (active ? ' active' : '')}
+                onClick={() => (page ? onNavigate(page) : stub(name))}
+              >
+                {navIcons[name]}
+                <span className="nav-label">{name}</span>
+                {!page && <span className="nav-stub">soon</span>}
+              </button>
+            );
+          })}
         </nav>
         <div className="rail-foot">
           <button className="collapse-btn" onClick={() => setCollapsed((c) => !c)}>
@@ -86,7 +95,7 @@ export function Shell({ demo, apps, onRefresh, children }: {
       <div className="main">
         <div className="topbar">
           <div className="topbar-inner">
-          <div className="page-title">Home</div>
+          <div className="page-title">{activePage === 'files' ? 'Files' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
               <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />
@@ -322,8 +331,8 @@ function ActivityBand({ activity }: { activity: ActivityEvent[] }) {
       <div className="band-head">
         <span className="band-num">3</span>
         <div>
-          <div className="band-title">Activity</div>
-          <div className="band-sub">Recent control-plane events — aggregator runs, snapshots, registrations</div>
+          <div className="band-title">Lately</div>
+          <div className="band-sub">Milestones and exceptions — the routine green is in Settings.</div>
         </div>
         <div className="band-action">
           <button className="ghost-btn" onClick={() => stub('Settings')}>Audit log {chevron}</button>
@@ -334,16 +343,17 @@ function ActivityBand({ activity }: { activity: ActivityEvent[] }) {
           <div className="feed-empty">No activity recorded yet.</div>
         ) : (
           activity.map((ev, i) => {
-            const [title, meta] = activityLine(ev);
+            const [sentence, show] = latelyLine(ev);
+            if (!show) return null;
             const sc = ev.short_code ?? '—';
+            const tone = latelyTone(ev);
             return (
-              <div className="feed-row" key={i}>
+              <div className={'feed-row ' + tone} key={i}>
                 <div className="feed-ico">
                   <div className="badge" style={{ width: 24, height: 24, fontSize: 10, background: colorFor(sc) }}>{sc[0]}</div>
                 </div>
                 <div className="feed-text">
-                  <div className="feed-title">{sc} — {title}</div>
-                  <div className="feed-meta">{meta}</div>
+                  <div className="feed-title">{sentence}</div>
                 </div>
                 <div className="feed-time">{ago(ev.occurred_at) ?? ''}</div>
               </div>
