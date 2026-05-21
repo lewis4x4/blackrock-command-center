@@ -226,8 +226,13 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
     setLoadMoreError('');
     // Clear pagination state at the START of a filter refresh so the user
     // can't apply the old cursor to the new filter set during inlineLoading.
+    // Also clear loadingMore here: an in-flight load-more's finally guard
+    // (seq === requestSeq.current) will refuse to release it after we bump
+    // the seq below, leaving the Load-more button stuck on "Loading…" once
+    // the new result set lands and re-shows it.
     setNextCursor(null);
     setHasMore(false);
+    setLoadingMore(false);
     if (initialLoaded) setInlineLoading(true);
     else setLoading(true);
     try {
