@@ -13,6 +13,7 @@
    Every value rendered traces to a column — nothing is invented.
    ============================================================================ */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL } from './utils';
 
 /* ───────────────────── Types — the v_command_center_home contract ───────── */
 export type BuildStatus = 'green' | 'yellow' | 'red' | 'unknown';
@@ -239,23 +240,7 @@ export async function loadIntegrations(): Promise<Record<string, Integrations>> 
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */
-export function sum(o: unknown): number {
-  if (!o || typeof o !== 'object') return 0;
-  return Object.values(o as Record<string, unknown>)
-    .reduce<number>((a, b) => a + (Number(b) || 0), 0);
-}
-
-export function ago(s: string | null | undefined): string | null {
-  if (!s) return null;
-  const m = Math.round((Date.now() - new Date(s).getTime()) / 60_000);
-  if (m < 1) return 'just now';
-  if (m < 60) return m + 'm ago';
-  const h = Math.round(m / 60);
-  if (h < 24) return h + 'h ago';
-  return Math.round(h / 24) + 'd ago';
-}
-export const hoursOld = (s: string | null | undefined): number | null =>
-  s ? (Date.now() - new Date(s).getTime()) / 3_600_000 : null;
+export { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL } from './utils';
 
 /* ───────────────────── Triage — aggregate signals only ──────────────────── */
 /* The control plane holds counts, never individual tasks/decisions, so every
@@ -290,23 +275,6 @@ export function deriveTriage(app: AppRow): TriageItem[] {
 
   return out.map((i) => ({ ...i, app }));
 }
-
-export const SEV_RANK: Record<TriageSev, number> = { critical: 0, needs: 1, watch: 2 };
-export const SEV_LABEL: Record<TriageSev, string> = { critical: 'CRITICAL', needs: 'NEEDS YOU', watch: 'WATCH' };
-
-export const APP_COLOR: Record<string, string> = {
-  QEP: '#7C6FF0', SCC: '#4F9CF0', COL: '#3DD68C', FND: '#F5A623',
-};
-export function colorFor(code: string): string {
-  return APP_COLOR[code] ?? '#5A6275';
-}
-
-export const HEALTH: Record<BuildStatus, { c: string; t: string }> = {
-  green: { c: 'var(--green)', t: 'Healthy' },
-  yellow: { c: 'var(--amber)', t: 'Attention' },
-  red: { c: 'var(--red)', t: 'Failing' },
-  unknown: { c: 'var(--grey)', t: 'Unknown' },
-};
 
 export type LatelyTone = 'plain' | 'needs' | 'failure';
 
@@ -368,7 +336,7 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
     }
     case 'decision_reply_received': {
       const owner = detailString(d, 'owner_name') ?? firstNameFromActor(ev.actor);
-      return [`${owner} replied to a decision on ${app} — it's waiting for you to confirm her answer.`, true];
+      return [`${owner} replied to a decision on ${app} — it's waiting for you to confirm their answer.`, true];
     }
     case 'work_order_created':
       return isAuthorizeWorkOrder(d)

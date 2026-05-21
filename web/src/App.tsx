@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   INITIAL_DEMO, loadApps, loadActivity,
   type AppRow, type ActivityEvent,
 } from './lib';
 import { Shell, HomeView, type ShellPage } from './Home';
-import { FilesView } from './Files';
+import { FilesView, type FilesViewHandle } from './Files';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
@@ -23,6 +23,7 @@ export default function App() {
   const [apps, setApps] = useState<AppRow[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [err, setErr] = useState('');
+  const filesRef = useRef<FilesViewHandle | null>(null);
 
   useEffect(() => {
     void load();
@@ -49,6 +50,14 @@ export default function App() {
     }
   }
 
+  async function onRefresh() {
+    if (page === 'files') {
+      await filesRef.current?.refresh();
+      return;
+    }
+    await load();
+  }
+
   function navigate(next: ShellPage) {
     const hash = hashForPage(next);
     if (window.location.hash === hash) setPage(next);
@@ -56,9 +65,9 @@ export default function App() {
   }
 
   return (
-    <Shell demo={INITIAL_DEMO} apps={apps} activePage={page} onNavigate={navigate} onRefresh={load}>
+    <Shell demo={INITIAL_DEMO} apps={apps} activePage={page} onNavigate={navigate} onRefresh={onRefresh}>
       {page === 'files' ? (
-        <FilesView />
+        <FilesView ref={filesRef} />
       ) : (
         <>
           {loadState === 'loading' && <Loading />}

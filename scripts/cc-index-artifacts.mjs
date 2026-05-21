@@ -32,10 +32,14 @@ import { join, relative, sep, basename, extname } from 'node:path';
 import { createHash } from 'node:crypto';
 
 const args = parseArgs(process.argv.slice(2));
-const FUNCTIONS_URL = (args.url ?? process.env.CC_FUNCTIONS_URL ?? '').replace(/\/$/, '');
+// Normalize operator input so either https://x.supabase.co or https://x.supabase.co/functions/v1 works.
+const FUNCTIONS_URL = (args.url ?? process.env.CC_FUNCTIONS_URL ?? '')
+  .replace(/\/functions\/v1\/?$/i, '')
+  .replace(/\/$/, '');
 const TOKEN = args.token ?? process.env.AGGREGATOR_TOKEN ?? '';
 const PRUNE = !!args.prune;
 const DRY = !!args['dry-run'];
+const FORCE = !!args.force;
 
 const REPO_ROOT = process.cwd();
 
@@ -204,6 +208,11 @@ if (DRY) {
   console.log(JSON.stringify({ ...manifest, items_count: manifest.items.length, items: manifest.items.slice(0, 5) }, null, 2));
   console.log(`\n# Dry run — would POST ${manifest.items.length} items.`);
   process.exit(0);
+}
+
+if (PRUNE && manifest.items.length < 5 && !FORCE) {
+  console.error(`Refusing to prune with ${manifest.items.length} items (< 5) — pass --force to override.`);
+  process.exit(4);
 }
 
 if (!FUNCTIONS_URL || !TOKEN) {

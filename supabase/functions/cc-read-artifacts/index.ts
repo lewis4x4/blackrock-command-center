@@ -2,12 +2,14 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jsr:@panva/jose@^6";
 
 // Browser read path for cc_artifacts — the first §4.11 surface.
-// The browser does NOT hold a Supabase key. It calls THIS function over HTTPS.
-// This function:
-//   1. Verifies the Cloudflare Access JWT (when CC_ACCESS_REQUIRED=true; otherwise a documented no-op).
-//   2. Reads cc_artifacts with the control-plane SERVICE_ROLE key, server-side.
-//   3. Returns exactly the shape the Files surface needs — no over-fetch, no raw table access from the browser.
-// When Security Track S1 lands, flip CC_ACCESS_REQUIRED=true and remove no other code.
+// Browser requests must target an Access-protected hostname when CC_ACCESS_REQUIRED=true;
+// Cloudflare only injects Cf-Access-Jwt-Assertion on hosts it actively gates.
+// Raw *.supabase.co/functions/v1 origins will 401 in Access-required mode.
+//
+// GET/OPTIONS only:
+//   1) Verify Cloudflare Access JWT when CC_ACCESS_REQUIRED=true.
+//   2) Otherwise enforce x-aggregator-token == AGGREGATOR_TOKEN as the interim operator gate.
+//   3) Read cc_artifacts with service-role on the server side and return the Files payload.
 
 const CP_URL = Deno.env.get("SUPABASE_URL")!;
 const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -15,9 +17,14 @@ const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ACCESS_REQUIRED = (Deno.env.get("CC_ACCESS_REQUIRED") ?? "false") === "true";
 const ACCESS_TEAM_DOMAIN = Deno.env.get("CC_ACCESS_TEAM_DOMAIN") ?? "";
 const ACCESS_AUD = Deno.env.get("CC_ACCESS_AUD") ?? "";
+const AGGREGATOR_TOKEN = Deno.env.get("AGGREGATOR_TOKEN") ?? "";
 
-if (!ACCESS_REQUIRED) {
-  console.log("cc-read-artifacts: CC_ACCESS_REQUIRED=false; Cloudflare Access JWT verification is currently a no-op.");
+if (ACCESS_REQUIRED) {
+  console.log("Cloudflare Access verification ENABLED (production-ready §4.11)");
+} else if (AGGREGATOR_TOKEN) {
+  console.log("Cloudflare Access verification DISABLED — falling back to x-aggregator-token operator gate (S1 not yet in front)");
+} else {
+  console.log("Cloudflare Access verification DISABLED AND no AGGREGATOR_TOKEN set — function will reject ALL requests");
 }
 
 const cpHeaders = {
@@ -28,8 +35,8 @@ const cpHeaders = {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion",
+  "Access-Control-Allow-Methods": "GET,OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-aggregator-token",
 };
 
 type CursorToken = { last_indexed_at: string; id: string };
@@ -38,7 +45,7 @@ type AccessResult = {
   ok: boolean;
   status: number;
   error?: string;
-  headerValue: "noop" | "pass";
+  headerValue: "token" | "pass";
 };
 
 const UUID_RE =
@@ -47,7 +54,7 @@ const UUID_RE =
 type VerifyKey = CryptoKey | Uint8Array;
 const jwkCache = new Map<string, VerifyKey>();
 
-function buildJsonResponse(body: unknown, status = 200, accessCheck: "noop" | "pass" = "noop"): Response {
+function buildJsonResponse(body: unknown, status = 200, accessCheck: "token" | "pass" = "token"): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
@@ -60,6 +67,18 @@ function buildJsonResponse(body: unknown, status = 200, accessCheck: "noop" | "p
 
 function isUuid(value: string): boolean {
   return UUID_RE.test(value);
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 function decodeCursor(raw: string): CursorToken {
@@ -87,10 +106,10 @@ function encodeCursor(c: CursorToken): string {
   return btoa(JSON.stringify(c));
 }
 
-async function cpGet(path: string): Promise<any[]> {
+async function cpGet(path: string): Promise<unknown[]> {
   const r = await fetch(`${CP_URL}/rest/v1/${path}`, { headers: cpHeaders });
   if (!r.ok) throw new Error(`control-plane GET ${path} -> ${r.status} ${await r.text()}`);
-  return r.json();
+  return asArray(await r.json());
 }
 
 async function loadJwksIntoCache(teamDomain: string): Promise<void> {
@@ -112,8 +131,18 @@ async function loadJwksIntoCache(teamDomain: string): Promise<void> {
   }
 }
 
+function verifyAggregatorHeader(presented: string | null): AccessResult {
+  if (!AGGREGATOR_TOKEN) {
+    return { ok: false, status: 401, error: "operator token not configured", headerValue: "token" };
+  }
+  if (!presented || presented !== AGGREGATOR_TOKEN) {
+    return { ok: false, status: 401, error: "missing or invalid x-aggregator-token", headerValue: "token" };
+  }
+  return { ok: true, status: 200, headerValue: "token" };
+}
+
 async function verifyAccessJwt(assertion: string | null): Promise<AccessResult> {
-  if (!ACCESS_REQUIRED) return { ok: true, status: 200, headerValue: "noop" };
+  if (!ACCESS_REQUIRED) return verifyAggregatorHeader(assertion);
 
   if (!ACCESS_TEAM_DOMAIN || !ACCESS_AUD) {
     return { ok: false, status: 500, error: "CC_ACCESS_TEAM_DOMAIN and CC_ACCESS_AUD are required when CC_ACCESS_REQUIRED=true", headerValue: "pass" };
@@ -158,7 +187,7 @@ function parseLimit(raw: string | null): number {
   return n;
 }
 
-function parseFilters(req: Request, body: Record<string, unknown> | null): {
+function parseFilters(req: Request): {
   q: string | null;
   kind: string | null;
   app_id: string | null;
@@ -168,23 +197,16 @@ function parseFilters(req: Request, body: Record<string, unknown> | null): {
 } {
   const url = new URL(req.url);
 
-  const readString = (key: string): string | null => {
-    const bodyVal = body?.[key];
-    if (typeof bodyVal === "string") return bodyVal;
-    const qs = url.searchParams.get(key);
-    return qs;
-  };
-
-  const q = readString("q");
-  const kind = readString("kind");
-  const app_id = readString("app_id");
-  const source = readString("source");
+  const q = url.searchParams.get("q");
+  const kind = url.searchParams.get("kind");
+  const app_id = url.searchParams.get("app_id");
+  const source = url.searchParams.get("source");
 
   if (app_id && !isUuid(app_id)) throw new Error("app_id must be a valid uuid");
 
-  const limit = parseLimit(readString("limit"));
+  const limit = parseLimit(url.searchParams.get("limit"));
 
-  const rawCursor = readString("cursor");
+  const rawCursor = url.searchParams.get("cursor");
   const cursor = rawCursor ? decodeCursor(rawCursor) : null;
 
   return {
@@ -195,6 +217,13 @@ function parseFilters(req: Request, body: Record<string, unknown> | null): {
     limit,
     cursor,
   };
+}
+
+function sanitizeSearch(raw: string): string {
+  const clipped = raw.slice(0, 200);
+  // PostgREST `or=(...)` uses comma/paren delimiters. Quotes and backslashes also break parsing.
+  // Replace these chars with spaces so user input cannot corrupt the filter grammar.
+  return clipped.replaceAll(/[,(\)'"\\]/g, " ").replaceAll("*", "\\*").trim();
 }
 
 function buildQuery(filters: {
@@ -221,13 +250,11 @@ function buildQuery(filters: {
   if (filters.source) params.append("source", `eq.${filters.source}`);
 
   if (filters.q) {
-    const escaped = filters.q.replaceAll("*", "\\*");
-    params.append("or", `(title.ilike.*${escaped}*,path.ilike.*${escaped}*,summary.ilike.*${escaped}*)`);
+    const safe = sanitizeSearch(filters.q);
+    if (safe) params.append("or", `(title.ilike.*${safe}*,path.ilike.*${safe}*,summary.ilike.*${safe}*)`);
   }
 
   if (filters.cursor) {
-    // Keyset pagination predicate on (last_indexed_at DESC, id DESC):
-    // fetch rows strictly "after" the current cursor in descending order.
     params.append(
       "or",
       `(last_indexed_at.lt.${filters.cursor.last_indexed_at},and(last_indexed_at.eq.${filters.cursor.last_indexed_at},id.lt.${filters.cursor.id}))`,
@@ -242,33 +269,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response("ok", { status: 200, headers: corsHeaders });
   }
 
-  if (req.method !== "GET" && req.method !== "POST") {
-    return buildJsonResponse({ error: "GET, POST, or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "noop");
+  if (req.method !== "GET") {
+    return buildJsonResponse({ error: "GET or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "token");
   }
 
-  let body: Record<string, unknown> | null = null;
-  if (req.method === "POST") {
-    try {
-      body = await req.json();
-    } catch {
-      return buildJsonResponse({ error: "invalid JSON body" }, 400, ACCESS_REQUIRED ? "pass" : "noop");
-    }
-  }
-
-  const access = await verifyAccessJwt(req.headers.get("Cf-Access-Jwt-Assertion"));
+  const access = await verifyAccessJwt(
+    ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-aggregator-token"),
+  );
   if (!access.ok) {
     return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
   }
 
   let filters;
   try {
-    filters = parseFilters(req, body);
+    filters = parseFilters(req);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: msg }, 400, access.headerValue);
   }
 
-  let rows: any[];
+  let rows: unknown[];
   try {
     rows = await cpGet(buildQuery(filters));
   } catch (e) {
@@ -280,8 +300,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const pageItems = hasMore ? rows.slice(0, filters.limit) : rows;
 
   const tail = pageItems.at(-1);
-  const nextCursor = hasMore && tail
-    ? encodeCursor({ last_indexed_at: tail.last_indexed_at, id: tail.id })
+  const tailRec = isRecord(tail) ? tail : null;
+  const tailIndexed = tailRec ? asString(tailRec.last_indexed_at) : null;
+  const tailId = tailRec ? asString(tailRec.id) : null;
+  const nextCursor = hasMore && tailIndexed && tailId
+    ? encodeCursor({ last_indexed_at: tailIndexed, id: tailId })
     : null;
 
   return buildJsonResponse(

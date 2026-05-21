@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { ago } from './lib';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { INITIAL_DEMO } from './lib';
+import { ago } from './utils';
 
 type ArtifactKind = 'doc' | 'migration' | 'edge_function' | 'spec' | 'report' | 'web_source' | 'script' | 'agent_output' | 'pull_request';
 type ArtifactSource = 'repo_scan' | 'agent_run' | 'manual';
@@ -33,10 +34,16 @@ interface ArtifactResponse {
   filters: Record<string, unknown>;
 }
 
+export type FilesViewHandle = {
+  refresh: () => Promise<void>;
+};
+
 const LOCAL_REPO = '/Users/brianlewis/Projects/blackrock-command-center';
 const PAGE_SIZE = 50;
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 const FUNCTIONS_URL = (import.meta.env.VITE_CC_FUNCTIONS_URL ?? `${SUPABASE_URL}/functions/v1`).replace(/\/$/, '');
+const OPERATOR_TOKEN = import.meta.env.VITE_CC_OPERATOR_TOKEN ?? '';
+const ACCESS_REQUIRED = (import.meta.env.VITE_CC_ACCESS_REQUIRED ?? 'false') === 'true';
 
 const KIND_OPTIONS: { value: ArtifactKind | ''; label: string }[] = [
   { value: '', label: 'All' },
@@ -141,7 +148,10 @@ async function readArtifacts(filters: ArtifactFilters, cursor: string | null): P
   if (filters.source) params.set('source', filters.source);
   if (cursor) params.set('cursor', cursor);
 
-  const res = await fetch(`${FUNCTIONS_URL}/cc-read-artifacts?${params.toString()}`, { method: 'GET' });
+  const headers: Record<string, string> = {};
+  if (!ACCESS_REQUIRED && OPERATOR_TOKEN) headers['x-aggregator-token'] = OPERATOR_TOKEN;
+
+  const res = await fetch(`${FUNCTIONS_URL}/cc-read-artifacts?${params.toString()}`, { method: 'GET', headers });
   const payload: unknown = await res.json().catch(() => null);
   if (!res.ok) {
     const msg = isRecord(payload)
@@ -182,7 +192,7 @@ function hasFilters(filters: ArtifactFilters): boolean {
   return !!filters.q.trim() || !!filters.kind || !!filters.source;
 }
 
-export function FilesView() {
+export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, ref) {
   const [filters, setFilters] = useState<ArtifactFilters>({ q: '', kind: '', source: '' });
   const [debouncedQ, setDebouncedQ] = useState('');
   const [items, setItems] = useState<Artifact[]>([]);
@@ -231,6 +241,10 @@ export function FilesView() {
     }
   }
 
+  useImperativeHandle(ref, () => ({
+    refresh: fetchFirst,
+  }));
+
   useEffect(() => {
     void fetchFirst();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -262,14 +276,31 @@ export function FilesView() {
 
   const filtered = hasFilters(effectiveFilters);
   const tally = `${items.length}${hasMore ? '+' : ''} artifact${items.length === 1 && !hasMore ? '' : 's'}`;
+  const latestIndexedAt = useMemo(() => {
+    if (!items.length) return null;
+    let latest: string | null = null;
+    for (const item of items) {
+      if (!latest || new Date(item.last_indexed_at).getTime() > new Date(latest).getTime()) latest = item.last_indexed_at;
+    }
+    return latest;
+  }, [items]);
+  const latestAgo = ago(latestIndexedAt);
+  const ageMs = latestIndexedAt ? (Date.now() - new Date(latestIndexedAt).getTime()) : null;
+  const staleTone = ageMs == null ? '' : ageMs > 7 * 24 * 60 * 60 * 1000 ? ' failure' : ageMs > 24 * 60 * 60 * 1000 ? ' needs' : '';
 
   return (
     <section className="band files-band">
+      {INITIAL_DEMO && (
+        <div className="files-demo-banner needs">
+          Demo mode: this surface still reads the live cc-read-artifacts function — there is no demo data path for files.
+        </div>
+      )}
       <div className="band-head">
         <span className="band-num">F</span>
         <div>
           <div className="band-title">Files.</div>
           <div className="band-sub">Every file the Command Center knows about — docs, migrations, edge functions, agent outputs.</div>
+          {items.length > 0 && latestAgo && <div className={`band-sub files-indexed-sub${staleTone}`}>Last indexed {latestAgo}.</div>}
         </div>
         <span className="count-chip">{loading && !initialLoaded ? 'loading' : tally}</span>
       </div>
@@ -302,7 +333,6 @@ export function FilesView() {
         {hasFilters(filters) && <button className="ghost-btn files-clear" onClick={clearFilters}>Clear</button>}
       </div>
 
-      {/* Stale state is intentionally not rendered here: cc_artifacts has no freshness model yet, only discovery/index timestamps per row. */}
       <div className="files-results">
         {inlineLoading && <div className="files-inline-progress" />}
         {error ? (
@@ -336,7 +366,7 @@ export function FilesView() {
       </div>
     </section>
   );
-}
+});
 
 function FilesSkeleton() {
   return (
@@ -431,7 +461,6 @@ function ArtifactDrawer({ item }: { item: Artifact }) {
           Copy path
         </button>
         {rawHref && (
-          // Intentional operator affordance: Brian runs this dashboard on his Mac Studio, so file:// opens the local repo checkout directly.
           <a className="ghost-btn file-raw-link" href={rawHref} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
             View raw
           </a>

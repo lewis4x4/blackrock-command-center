@@ -42,10 +42,10 @@ const ALLOWED_KINDS = new Set<ArtifactKind>([
   "pull_request",
 ]);
 
-async function cpGet(path: string): Promise<any[]> {
+async function cpGet(path: string): Promise<unknown[]> {
   const r = await fetch(`${CP_URL}/rest/v1/${path}`, { headers: cpHeaders });
   if (!r.ok) throw new Error(`control-plane GET ${path} -> ${r.status} ${await r.text()}`);
-  return r.json();
+  return asArray(await r.json());
 }
 
 async function cpInsert(table: string, row: unknown): Promise<void> {
@@ -54,7 +54,10 @@ async function cpInsert(table: string, row: unknown): Promise<void> {
     headers: { ...cpHeaders, Prefer: "return=minimal" },
     body: JSON.stringify(row),
   });
-  if (!r.ok) throw new Error(`control-plane INSERT ${table} -> ${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(JSON.stringify({ status: r.status, detail }));
+  }
 }
 
 async function cpPatch(path: string, row: unknown): Promise<void> {
@@ -64,6 +67,28 @@ async function cpPatch(path: string, row: unknown): Promise<void> {
     body: JSON.stringify(row),
   });
   if (!r.ok) throw new Error(`control-plane PATCH ${path} -> ${r.status} ${await r.text()}`);
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function isUniqueViolationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  try {
+    const parsed = JSON.parse(error.message) as { status?: number; detail?: string };
+    return parsed.status === 409 && parsed.detail.includes('"code":"23505"');
+  } catch {
+    return false;
+  }
 }
 
 function bad(message: string, status = 400): Response {
@@ -137,11 +162,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
       scanPaths.add(item.path);
 
       const existing = await cpGet(
-        `cc_artifacts?select=id&source=eq.repo_scan&deleted_at=is.null&path=eq.${encodeURIComponent(item.path)}&limit=1`,
+        `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&limit=1`,
       );
 
-      if (existing.length > 0) {
-        await cpPatch(`cc_artifacts?id=eq.${existing[0].id}`, {
+      const existingFirst = existing[0];
+      const existingId = isRecord(existingFirst) ? asString(existingFirst.id) : null;
+      if (existingId) {
+        await cpPatch(`cc_artifacts?id=eq.${existingId}`, {
           title: item.title,
           kind: item.kind,
           byte_size: item.byte_size,
@@ -153,21 +180,42 @@ Deno.serve(async (req: Request): Promise<Response> => {
         });
         updated += 1;
       } else {
-        await cpInsert("cc_artifacts", {
-          app_id: null,
-          kind: item.kind,
-          title: item.title,
-          path: item.path,
-          url: null,
-          source: "repo_scan",
-          summary: item.summary,
-          byte_size: item.byte_size,
-          produced_by: producedBy,
-          content_sha: item.content_sha,
-          discovered_at: nowIso,
-          last_indexed_at: nowIso,
-        });
-        inserted += 1;
+        try {
+          await cpInsert("cc_artifacts", {
+            app_id: null,
+            kind: item.kind,
+            title: item.title,
+            path: item.path,
+            url: null,
+            source: "repo_scan",
+            summary: item.summary,
+            byte_size: item.byte_size,
+            produced_by: producedBy,
+            content_sha: item.content_sha,
+            discovered_at: nowIso,
+            last_indexed_at: nowIso,
+          });
+          inserted += 1;
+        } catch (insertError) {
+          if (!isUniqueViolationError(insertError)) throw insertError;
+          const concurrent = await cpGet(
+            `cc_artifacts?select=id&source=eq.repo_scan&path=eq.${encodeURIComponent(item.path)}&limit=1`,
+          );
+          const concurrentFirst = concurrent[0];
+          const concurrentId = isRecord(concurrentFirst) ? asString(concurrentFirst.id) : null;
+          if (!concurrentId) throw insertError;
+          await cpPatch(`cc_artifacts?id=eq.${concurrentId}`, {
+            title: item.title,
+            kind: item.kind,
+            byte_size: item.byte_size,
+            content_sha: item.content_sha,
+            summary: item.summary,
+            produced_by: producedBy,
+            last_indexed_at: nowIso,
+            deleted_at: null,
+          });
+          updated += 1;
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -187,10 +235,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     try {
       const existingRows = await cpGet("cc_artifacts?select=id,path&source=eq.repo_scan&deleted_at=is.null");
       for (const row of existingRows) {
+        if (!isRecord(row)) continue;
         const rowPath = typeof row.path === "string" ? row.path : "";
         if (!rowPath || scanPaths.has(rowPath)) continue;
         try {
-          await cpPatch(`cc_artifacts?id=eq.${row.id}`, { deleted_at: nowIso, last_indexed_at: nowIso });
+          const rowId = asString(row.id);
+          if (!rowId) continue;
+          await cpPatch(`cc_artifacts?id=eq.${rowId}`, { deleted_at: nowIso, last_indexed_at: nowIso });
           pruned += 1;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
