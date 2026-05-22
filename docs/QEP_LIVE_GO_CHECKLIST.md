@@ -13,6 +13,12 @@ Helper scripts (this repo):
 
 ---
 
+> **⚠️ Important update (2026-05-22):** Supabase migrated the JWT system to asymmetric **JWT Signing Keys**. On migrated projects, the **Legacy JWT Secret** is used **only to verify Supabase-issued JWTs** (anon + service_role) — not third-party HMAC-signed JWTs. This means **locally minting `READ_KEY_QEP` with `role: "command_center"` is blocked at the platform layer** for migrated projects.
+>
+> The federation boundary still holds via `SECURITY DEFINER` on `cc_export_snapshot()` and `cc_export_detail()` (both owned by `cc_contract_owner`). The aggregator + cockpit continue calling under `SVC_KEY_QEP`. The "JWT class downgrade" portion of Tier 1 (retiring `SVC_KEY_QEP` outright) is **deferred until Supabase clarifies the path for third-party custom-role JWT minting** — possibly via the new publishable/secret API key system or a server-side mint endpoint.
+>
+> Steps 1.2, 1.3, 1.4, 1.5 below remain operational guidance for any future Supabase project that still uses the legacy HMAC validation path. Skip them on JWT-Signing-Keys-migrated projects.
+
 ## Tier 1 — Make the cockpit show real QEP data (≤ 1 hour)
 
 After Tier 1, `/apps/qep` lights up: real Streams/Waves/tasks, real decisions you can answer inline, the 47 blocked items listed by name, the `key_class` cutover observable in the audit log.

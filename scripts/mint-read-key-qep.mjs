@@ -3,6 +3,20 @@
 // mint-read-key-qep.mjs
 // One-shot JWT minter for READ_KEY_QEP.
 //
+// ⚠️ KNOWN LIMITATION (2026-05-22): on Supabase projects that have been
+// migrated to the new "JWT Signing Keys" (asymmetric) system, the Legacy
+// JWT Secret is used ONLY to verify Supabase-issued JWTs (anon +
+// service_role). PostgREST will reject any locally-minted HMAC JWT with
+// "Invalid API key" even when the signature mathematically validates.
+// QEP is in this state today; this minter currently produces JWTs that
+// QEP rejects. Federation continues to work via SECURITY DEFINER on the
+// contract functions. See docs/QEP_LIVE_GO_CHECKLIST.md banner.
+//
+// This minter remains correct for any Supabase project that still uses
+// the legacy HMAC validation path. Onboarding a new client app: check
+// whether the project has migrated to JWT Signing Keys before relying on
+// this script.
+//
 // Mints a long-lived HS256 JWT with `role: "command_center"` signed by QEP's
 // Supabase JWT secret. The control plane stores this as the edge-function
 // secret `READ_KEY_QEP`; the Aggregator + cc-read-app-detail use it to call
