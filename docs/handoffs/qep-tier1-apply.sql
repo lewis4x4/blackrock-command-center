@@ -56,6 +56,12 @@ END$$;
 -- PostgREST needs to be able to switch into the JWT's role: "command_center" claim.
 GRANT command_center TO authenticator;
 
+-- Make the migrating role (typically `postgres` in the Supabase SQL editor) a
+-- member of cc_contract_owner so the ALTER FUNCTION ... OWNER TO statement
+-- below can proceed. PostgreSQL requires SET ROLE membership for ownership
+-- reassignment. Idempotent.
+GRANT cc_contract_owner TO CURRENT_USER;
+
 -- command_center can resolve names in the public schema, but cannot read any
 -- table or view there directly — only call the contract functions.
 GRANT USAGE ON SCHEMA public TO command_center;
