@@ -274,12 +274,13 @@ function appStatus(app: AppRecord, extra: Omit<AppStatusRecord, keyof AppIdentit
   return { app_id: app.app_id, app_short_code: app.app_short_code, app_display_name: app.app_display_name, ...extra };
 }
 
-function tagDecision(app: AppRecord, row: Record<string, unknown>): Record<string, unknown> {
+function tagDecision(app: AppRecord, row: Record<string, unknown>, ccIssueId: string | null): Record<string, unknown> {
   return {
     ...row,
     app_id: app.app_id,
     app_short_code: app.app_short_code,
     app_display_name: app.app_display_name,
+    cc_issue_id: ccIssueId,
   };
 }
 
@@ -349,7 +350,7 @@ function parseMaxAgeDays(raw: string | null): number | null {
   return n;
 }
 
-async function fanOutApp(app: AppRecord, dp: DataPlaneRecord | undefined, cursor: string | null): Promise<FanoutResult> {
+async function fanOutApp(app: AppRecord, dp: DataPlaneRecord | undefined, ccIssueId: string | null, cursor: string | null): Promise<FanoutResult> {
   if (!dp) return { kind: "unwired", app, reason: "data_plane_not_configured" };
 
   try {
@@ -357,7 +358,7 @@ async function fanOutApp(app: AppRecord, dp: DataPlaneRecord | undefined, cursor
     return {
       kind: "reached",
       app,
-      decisions: normalizeDecisionItems(detail.data).map((row) => tagDecision(app, row)),
+      decisions: normalizeDecisionItems(detail.data).map((row) => tagDecision(app, row, ccIssueId)),
       keyClass: detail.keyClass,
       secretName: detail.secretName,
       fallbackFrom: detail.fallbackFrom,
@@ -426,6 +427,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let apps: AppRecord[];
   let dpRows: DataPlaneRecord[];
   let answeredRecent: unknown[];
+  let aggregateIssueByApp: Map<string, string> = new Map();
   try {
     const appPath = appId
       ? `registry_apps?id=eq.${appId}&deleted_at=is.null&status=eq.active&select=id,short_code,display_name&limit=1`
@@ -434,21 +436,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
       cpGet("cc_decision_answers?select=id,issue_id,app_id,decision_external_ref,answer_value,answer_options_snapshot,rationale,risk_class,answered_by,answered_at,dispatched_at,registry_apps(short_code,display_name)&deleted_at=is.null&order=answered_at.desc&limit=20"),
+      appIdFilter
+        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&source_ref=eq.aggregate&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,created_at&order=created_at.desc`)
+        : Promise.resolve([]),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
+    // Map: app_id -> most recent aggregate open_decision cc_issues.id
+    aggregateIssueByApp = new Map();
+    for (const row of rawAggregateIssues.filter(isRecord)) {
+      const appIdValue = asString(row.app_id);
+      const issueIdValue = asString(row.id);
+      if (!appIdValue || !issueIdValue) continue;
+      if (!aggregateIssueByApp.has(appIdValue)) {
+        aggregateIssueByApp.set(appIdValue, issueIdValue); // most-recent (ordered DESC)
+      }
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "database read failed", detail: msg }, 500, access.headerValue);
   }
 
   const dpByAppId = new Map(dpRows.filter(isRecord).map((row) => [asString(row.app_id), row as DataPlaneRecord]));
-  const fanout = await Promise.all(apps.map((app) => fanOutApp(app, dpByAppId.get(app.app_id), cursor)));
+  const fanout = await Promise.all(apps.map((app) => fanOutApp(app, dpByAppId.get(app.app_id), aggregateIssueByApp.get(app.app_id) ?? null, cursor)));
 
   const appsReached = fanout
     .filter((result): result is Extract<FanoutResult, { kind: "reached" }> => result.kind === "reached")
