@@ -99,9 +99,12 @@ export class GitHubApp implements GitHubTokenProvider, GitHubPullRequestClient {
 
   async openPullRequest(input: PullRequestInput): Promise<string> {
     const { owner, name } = parseRepo(input.targetRepo);
-    const response = await this.githubFetch(`/repos/${owner}/${name}/pulls`, {
+    const rawResponse = await this.fetchImpl(`${this.apiBaseUrl}/repos/${owner}/${name}/pulls`, {
       method: "POST",
       headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "blackrock-command-center-runner",
         Authorization: `Bearer ${input.token}`,
         "Content-Type": "application/json",
       },
@@ -113,9 +116,42 @@ export class GitHubApp implements GitHubTokenProvider, GitHubPullRequestClient {
         maintainer_can_modify: true,
       }),
     });
-    const payload = await response.json() as { html_url?: string };
-    if (!payload.html_url) throw new Error("GitHub PR response was missing html_url");
-    return payload.html_url;
+
+    if (rawResponse.ok) {
+      const payload = await rawResponse.json() as { html_url?: string };
+      if (!payload.html_url) throw new Error("GitHub PR response was missing html_url");
+      return payload.html_url;
+    }
+
+    // Idempotency: if a PR for this branch already exists (e.g., Claude opened
+    // it, or a previous attempt got partway through), look it up and treat as
+    // success rather than failing the work order.
+    const body = await rawResponse.text();
+    if (rawResponse.status === 422 && /already exists|pull request already exists/i.test(body)) {
+      const existing = await this.findOpenPullRequest(owner, name, input.headBranch, input.token);
+      if (existing) return existing;
+    }
+
+    throw new Error(`GitHub POST /repos/${owner}/${name}/pulls -> ${rawResponse.status}: ${body}`);
+  }
+
+  private async findOpenPullRequest(owner: string, name: string, headBranch: string, token: string): Promise<string | null> {
+    const head = `${owner}:${headBranch}`;
+    const response = await this.fetchImpl(
+      `${this.apiBaseUrl}/repos/${owner}/${name}/pulls?head=${encodeURIComponent(head)}&state=open&per_page=1`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "blackrock-command-center-runner",
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+    if (!response.ok) return null;
+    const payload = await response.json() as Array<{ html_url?: string }>;
+    if (!Array.isArray(payload) || payload.length === 0) return null;
+    return payload[0]?.html_url ?? null;
   }
 
   private async lookupInstallationId(owner: string, repo: string, jwt: string): Promise<string> {

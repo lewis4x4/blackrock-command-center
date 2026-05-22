@@ -70,7 +70,7 @@ echo "  QEP app_id: $APP_ID"
 echo "Step 2: Enqueue test work order ($IDEMPOTENCY_KEY) ..."
 CHANGE_SPEC=$(jq -n \
   --arg intent "$INTENT" \
-  '{intent: $intent, affected_area: "README.md", acceptance_criteria: ["A single comment line appears at the bottom of README.md with a UTC timestamp", "All other files unchanged", "PR has exactly one commit"], constraints: ["Single PR", "Branch must start with cc/", "Do not modify any other file"], branch_hint: ("cc/smoke-" + now | tostring)}')
+  '{intent: $intent, affected_area: "README.md", acceptance_criteria: ["A single comment line appears at the bottom of README.md with a UTC timestamp", "All other files unchanged", "PR has exactly one commit"], constraints: ["Single PR", "Branch must start with cc/", "Do not modify any other file"], branch_hint: ("cc/smoke-" + (now | tostring))}')
 
 ENQUEUE_RES="$(curl -fsS "$CP_HOST/rest/v1/rpc/cc_enqueue_with_gating" \
   -H "apikey: $SVC_KEY" -H "Authorization: Bearer $SVC_KEY" \
