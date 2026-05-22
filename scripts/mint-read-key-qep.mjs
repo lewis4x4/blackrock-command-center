@@ -36,10 +36,14 @@ if (!secret || !secret.trim()) {
 const b64url = (value) =>
   Buffer.from(JSON.stringify(value)).toString("base64url");
 
+const QEP_PROJECT_REF =
+  process.env.QEP_PROJECT_REF?.trim() || "iciddijgonywtxoelous";
+
 const now = Math.floor(Date.now() / 1000);
 const header = { alg: "HS256", typ: "JWT" };
 const payload = {
   iss: "supabase",
+  ref: QEP_PROJECT_REF,
   role: "command_center",
   iat: now,
   exp: now + 60 * 60 * 24 * 90, // 90 days — rotate this on a 60-day cadence
