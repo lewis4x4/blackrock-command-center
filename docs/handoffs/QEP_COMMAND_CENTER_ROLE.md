@@ -4,6 +4,8 @@ Target: QEP data plane (`iciddijgonywtxoelous`), not the Command Center control 
 
 ## 1. Apply the QEP data-plane SQL
 
+Before applying this role grant, verify `cc_export_snapshot()` security mode per §1a. The GRANT below is safe only if `cc_export_snapshot()` runs as a definer-owned contract rather than exposing direct table access through `command_center`.
+
 The permission contract is exactly:
 
 ```sql
@@ -36,9 +38,50 @@ COMMIT;
 
 Do not grant `SELECT` on client tables to `command_center`.
 
+## 1a. Verify (or convert) `cc_export_snapshot()` to `SECURITY DEFINER`
+
+Run `scripts/qep-introspect.mjs` (delivered by the sibling agent in this commit) against QEP before cutover. It should inspect `pg_proc.prosecdef` for both `public.cc_export_snapshot()` and `public.cc_export_detail(text, text)` so the operator can see whether each function is `SECURITY DEFINER` (`prosecdef = true`) or `SECURITY INVOKER` (`prosecdef = false`).
+
+If `cc_export_snapshot()` is already `SECURITY DEFINER`, no change is needed beyond the §1 GRANT:
+
+```sql
+BEGIN;
+
+GRANT EXECUTE ON FUNCTION public.cc_export_snapshot() TO command_center;
+
+COMMIT;
+```
+
+If `cc_export_snapshot()` is `SECURITY INVOKER`, the same QEP migration that adds the `command_center` role must also convert the function to a definer-owned contract. The owner must be a role that already has `SELECT` on the snapshot tables; do **not** grant those table reads to `command_center`.
+
+```sql
+BEGIN;
+
+-- Use the existing QEP contract-owner role if one already owns snapshot reads.
+-- Otherwise create a dedicated NOLOGIN owner and grant it only the SELECTs the
+-- cc_export_snapshot() body needs.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cc_contract_owner') THEN
+    CREATE ROLE cc_contract_owner NOLOGIN;
+  END IF;
+END$$;
+
+-- Example only: replace with the actual snapshot source tables/views used by QEP.
+GRANT SELECT ON public.<snapshot_source_table> TO cc_contract_owner;
+
+ALTER FUNCTION public.cc_export_snapshot() OWNER TO cc_contract_owner;
+ALTER FUNCTION public.cc_export_snapshot() SECURITY DEFINER SET search_path = '';
+GRANT EXECUTE ON FUNCTION public.cc_export_snapshot() TO command_center;
+
+COMMIT;
+```
+
+After conversion, re-run `scripts/qep-introspect.mjs`; `cc_export_snapshot()` should report `prosecdef = true`.
+
 ## 2. Mint `READ_KEY_QEP`
 
-Use QEP's Supabase JWT secret. Do not use the Command Center JWT secret.
+Use QEP's Supabase JWT secret. Do not use the Command Center JWT secret. Rotate `READ_KEY_QEP` every 60 days; re-run this minting step with the same `QEP_JWT_SECRET`, then update the control-plane secret.
 
 ```bash
 export QEP_JWT_SECRET='<QEP JWT secret>'
@@ -56,7 +99,7 @@ const payload = {
   iss: 'supabase',
   role: 'command_center',
   iat: now,
-  exp: now + 60 * 60 * 24 * 365,
+  exp: now + 60 * 60 * 24 * 90, // 90 days — rotate this on a 60-day cadence
 };
 
 const unsigned = `${b64url(header)}.${b64url(payload)}`;

@@ -75,9 +75,9 @@ The exact SQL contract is in `docs/handoffs/QEP_CC_EXPORT_DETAIL.md`. Same two-o
 
 Once applied, refresh `/apps/qep` — the placeholders flip to real data. The "Review blockers" slide-over now lists the 47 actual blocked items by title.
 
-### 1.6 — (Optional) Retire `SVC_KEY_QEP`
+### 1.6 — Retire `SVC_KEY_QEP`
 
-Once the audit log has shown `key_class: "readonly"` consistently for 24 hours and you're confident no fallbacks are happening:
+Wait at least 24 hours after Step 1.5 confirms `key_class: "readonly"`, then check the audit log for zero `fallback_from` events in that window:
 
 ```bash
 # Confirm no fallback events in the last day
@@ -85,12 +85,25 @@ curl -s "https://gsvhuzpysxaegoecwjmf.supabase.co/functions/v1/cc-read-audit?lim
   -H "x-cc-read-token: <VITE_CC_READ_TOKEN>" \
   | jq '.events | map(select(.detail.fallback_from != null)) | length'
 # Expected: 0
+```
 
-# Then unset the legacy secret
+If the result is `0`, unset the legacy secret:
+
+```bash
 supabase secrets unset SVC_KEY_QEP --project-ref gsvhuzpysxaegoecwjmf
 ```
 
 S2 is now fully complete — no standing god-credential anywhere.
+
+### 1.7 — Schedule `READ_KEY_QEP` rotation
+
+Add a calendar reminder to rotate `READ_KEY_QEP` every 60 days (mint expires at 90). Rotation: re-run `scripts/mint-read-key-qep.mjs` with the same `QEP_JWT_SECRET`, then set the control-plane secret again:
+
+```bash
+QEP_JWT_SECRET='<QEP Supabase JWT secret>' node scripts/mint-read-key-qep.mjs \
+  | xargs -I {} supabase secrets set READ_KEY_QEP='{}' \
+      --project-ref gsvhuzpysxaegoecwjmf
+```
 
 ---
 

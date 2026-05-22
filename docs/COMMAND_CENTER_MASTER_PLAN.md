@@ -558,14 +558,14 @@ COMMIT;
 ```sql
 -- Lives on the CLIENT app's data plane (e.g. QEP migration 6xx).
 cc_export_detail(
-  p_section text,                    -- 'decisions' | 'build' | 'blockers' | 'sync' | 'roadmap'
-  p_cursor  text  DEFAULT NULL,
-  p_limit   int   DEFAULT 100,       -- capped server-side
-  p_filter  jsonb DEFAULT '{}'
+  p_section text DEFAULT 'all',       -- 'all' | 'decisions' | 'build' | 'blockers' | 'sync' | 'roadmap'
+  p_cursor  text DEFAULT NULL
 ) RETURNS jsonb                       -- { section, contract_version, generated_at, cursor:{next,has_more}, items:[...] }
 ```
 
-`SECURITY INVOKER`; `REVOKE EXECUTE FROM PUBLIC`; `GRANT EXECUTE` only to the per-app scoped read role (§4.9). The client app owns exactly which columns each section exposes — the contract is the *shape*, not table access. Read-on-demand; the Aggregator never calls it, so the home stays cheap. Section payload shapes are specified per panel in §5.
+The 4-arg signature in earlier drafts is superseded; `p_limit` is hard-coded server-side (50), and `p_filter` is reserved for future use — out of scope for current cockpit.
+
+`SECURITY DEFINER`; `REVOKE EXECUTE FROM PUBLIC`; `GRANT EXECUTE` only to the per-app scoped read role (§4.9). The client app owns exactly which columns each section exposes — the contract is the *shape*, not table access. Read-on-demand; the Aggregator never calls it, so the home stays cheap. Section payload shapes are specified per panel in §5.
 
 **`cc_apply_*()`** — the write siblings, also on each client app: `cc_apply_decision_answer()`, `cc_apply_task_state()`, `cc_apply_blocker_resolution()`. Each accepts only enumerated/typed arguments, never a repo or free text, and the client app owns exactly what they may mutate.
 
@@ -584,7 +584,7 @@ CREATE ROLE command_center NOLOGIN;
 GRANT command_center TO authenticator;            -- so PostgREST can assume it
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM command_center;
 GRANT EXECUTE ON FUNCTION public.cc_export_snapshot() TO command_center;
-GRANT EXECUTE ON FUNCTION public.cc_export_detail(text,text,int,jsonb) TO command_center;
+GRANT EXECUTE ON FUNCTION public.cc_export_detail(text, text) TO command_center;
 -- cc_apply_*() are granted to a separate, narrowly-scoped write role.
 ```
 

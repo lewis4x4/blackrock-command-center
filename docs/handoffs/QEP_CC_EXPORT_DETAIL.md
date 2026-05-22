@@ -10,7 +10,7 @@ QEP owns the cockpit surface. The QEP team chooses exactly which columns are exp
 
 ## SQL to apply in QEP
 
-This is the full contract shape. Replace the marked section queries with QEP-owned tables/views and QEP-approved columns before applying. Keep the function name, args, return envelope, `SECURITY INVOKER`, revokes, and grant intact.
+This is the full contract shape. Replace the marked section queries with QEP-owned tables/views and QEP-approved columns before applying. Keep the function name, args, return envelope, `SECURITY DEFINER`, revokes, and grant intact.
 
 ```sql
 BEGIN;
@@ -25,13 +25,29 @@ END$$;
 GRANT command_center TO authenticator;
 GRANT USAGE ON SCHEMA public TO command_center;
 
+-- Optional: dedicate a function-owner role (clean separation).
+-- If qep already has a 'cc_contract_owner' role, reuse it; otherwise create:
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cc_contract_owner') THEN
+    CREATE ROLE cc_contract_owner NOLOGIN;
+  END IF;
+END$$;
+
+-- Grant cc_contract_owner the SELECTs it needs (per the CTE wiring below).
+-- These grants live on cc_contract_owner, NEVER on command_center.
+-- Example (replace with QEP's real tables/views):
+GRANT SELECT ON public.qep_roadmap_tasks TO cc_contract_owner;
+GRANT SELECT ON public.qep_decisions TO cc_contract_owner;
+GRANT SELECT ON public.v_qep_roadmap_sync_health TO cc_contract_owner;
+
 CREATE OR REPLACE FUNCTION public.cc_export_detail(
   p_section text DEFAULT 'all',
   p_cursor  text DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = public
+SECURITY DEFINER
+SET search_path = ''
 AS $fn$
 DECLARE
   v_section text := lower(coalesce(nullif(trim(p_section), ''), 'all'));
@@ -49,6 +65,8 @@ BEGIN
     /*
       QEP owns the source and exposed columns.
       Replace this CTE with a real read from QEP's roadmap/Linear mirror tables or a dedicated safe view.
+      Fully-qualify all schema references (for example, public.qep_roadmap_tasks)
+      because search_path is empty. This is intentional — prevents schema-search hijack.
       Recommended item keys: id, stream, wave, title, status, owner, priority, blocker, updated_at.
     */
     WITH roadmap_items AS (
@@ -86,6 +104,8 @@ BEGIN
     /*
       QEP owns the source and exposed columns.
       Replace this CTE with open operator/client decisions safe for the Command Center.
+      Fully-qualify all schema references (for example, public.qep_decisions)
+      because search_path is empty. This is intentional — prevents schema-search hijack.
       Recommended item keys: id, title, owner, status, age, source_ref, updated_at.
     */
     WITH decision_items AS (
@@ -119,6 +139,8 @@ BEGIN
     /*
       QEP owns the source and exposed columns.
       Replace this CTE with Linear/snapshot sync health rows safe for the Command Center.
+      Fully-qualify all schema references (for example, public.v_qep_roadmap_sync_health)
+      because search_path is empty. This is intentional — prevents schema-search hijack.
       Recommended item keys: source, status, total_tasks, mirrored_tasks, pending_count, error_count, last_checked.
     */
     WITH sync_items AS (
@@ -156,23 +178,16 @@ BEGIN
 END;
 $fn$;
 
+ALTER FUNCTION public.cc_export_detail(text, text) OWNER TO cc_contract_owner;
+
 COMMENT ON FUNCTION public.cc_export_detail(text, text) IS
-  'Command Center cockpit detail contract. SECURITY INVOKER; QEP owns which safe columns each section exposes.';
+  'Command Center cockpit detail contract. SECURITY DEFINER; QEP owns which safe columns each section exposes.';
 
 REVOKE EXECUTE ON FUNCTION public.cc_export_detail(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.cc_export_detail(text, text) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.cc_export_detail(text, text) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.cc_export_detail(text, text) TO command_center;
-
-/*
-  Because this function is SECURITY INVOKER, command_center also needs SELECT on the specific
-  QEP tables/views used in the CTEs above. Prefer granting SELECT on dedicated safe views, not raw tables.
-  Example:
-
-  GRANT SELECT ON public.cc_safe_roadmap_items TO command_center;
-  GRANT SELECT ON public.cc_safe_decision_items TO command_center;
-  GRANT SELECT ON public.cc_safe_sync_items TO command_center;
-*/
+-- Note: NO `GRANT SELECT` to command_center. Function runs as cc_contract_owner.
 
 COMMIT;
 ```
@@ -218,6 +233,17 @@ curl -i \
 ```
 
 Expected: permission denied / not executable for non-`command_center` roles.
+
+Direct-table negative case, using the database console after the function is installed:
+
+```sql
+SET ROLE command_center;
+SELECT public.cc_export_detail('all', NULL); -- should succeed
+SELECT * FROM public.qep_decisions LIMIT 1; -- must fail with permission denied
+RESET ROLE;
+```
+
+Expected: `cc_export_detail()` succeeds, but direct reads from QEP tables still return `permission denied`. `command_center` has no direct `SELECT` on any QEP table — this is intentional federation containment.
 
 ## Command Center dependency
 

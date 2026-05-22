@@ -18,6 +18,9 @@
 //
 // Or copy/paste the printed JWT manually.
 //
+// Rotate every 60 days. Re-run this script with the same QEP_JWT_SECRET to
+// mint a fresh JWT, then `supabase secrets set` it.
+//
 // Do NOT commit the printed JWT. Do NOT commit QEP_JWT_SECRET to .env.
 // ============================================================================
 
@@ -39,7 +42,7 @@ const payload = {
   iss: "supabase",
   role: "command_center",
   iat: now,
-  exp: now + 60 * 60 * 24 * 365, // 1 year
+  exp: now + 60 * 60 * 24 * 90, // 90 days — rotate this on a 60-day cadence
 };
 
 const unsigned = `${b64url(header)}.${b64url(payload)}`;
