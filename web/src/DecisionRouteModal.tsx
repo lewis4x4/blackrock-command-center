@@ -42,21 +42,34 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
 
     async function start() {
       if (!issueId) throw new Error('This decision row is missing a control-plane issue id.');
-      const [recipientRows, rewrite] = await Promise.all([
-        loadDecisionRecipients(appId, demo),
-        rewriteDecision({
-          issue_id: issueId,
-          app_id: appId,
-          decision_external_ref: rowId(decision),
-          raw_title: rawTitle,
-          raw_body: rawBody,
-          options: rawOptions,
-          risk_class: riskFor(decision),
-        }, demo),
-      ]);
+      // Load recipients independently so a rewrite failure does not also hide
+      // them (defense in depth — the recipient list is always useful context).
+      const recipientsPromise = loadDecisionRecipients(appId, demo)
+        .then((recipientRows) => {
+          if (cancelled) return;
+          const active = recipientRows.filter((row) => row.active);
+          setRecipients(active);
+          setSelectedRecipients(new Set(active.map((row) => row.id)));
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          // Surface load errors as a non-fatal warning via the recipient empty state.
+          setRecipients([]);
+          setSelectedRecipients(new Set());
+          console.warn('decision recipient load failed', e);
+        });
+      const rewrite = await rewriteDecision({
+        issue_id: issueId,
+        app_id: appId,
+        decision_external_ref: rowId(decision),
+        raw_title: rawTitle,
+        raw_body: rawBody,
+        options: rawOptions,
+        risk_class: riskFor(decision),
+      }, demo);
       if (cancelled) return;
-      setRecipients(recipientRows.filter((row) => row.active));
-      setSelectedRecipients(new Set(recipientRows.filter((row) => row.active).map((row) => row.id)));
+      await recipientsPromise;
+      if (cancelled) return;
       await pollRewrite(rewrite.id, cancelledRef(() => cancelled));
     }
 

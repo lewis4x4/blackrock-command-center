@@ -55,7 +55,12 @@ Deno.serve(async (req) => {
     if (!issue) return json({ error: "issue not found" }, 404, access.headerValue);
     if (cleanString(issue.app_id, 80) !== appId) return json({ error: "issue does not belong to app_id" }, 400, access.headerValue);
     const status = cleanString(issue.status, 40);
-    if (!status || !["surfaced", "triaging", "routed_to_client"].includes(status)) return json({ error: `issue status ${status ?? "unknown"} is not routable` }, 400, access.headerValue);
+    // Routable from: surfaced (untriaged), triaging (operator looking at it),
+    // routed_to_client (already routed — allow re-route / retry), and
+    // answered (operator answered internally but wants client confirmation).
+    // The act of routing to recipients is itself an explicit operator decision
+    // that overrides any prior internal-answer classification.
+    if (!status || !["surfaced", "triaging", "routed_to_client", "answered"].includes(status)) return json({ error: `issue status ${status ?? "unknown"} is not routable` }, 400, access.headerValue);
     const sourceRef = cleanString(issue.source_ref, 200);
     if (sourceRef && !["aggregate", "build", "sync", "blocked"].includes(sourceRef) && sourceRef !== decisionExternalRef) {
       return json({ error: "decision_external_ref does not match issue source_ref" }, 400, access.headerValue);
