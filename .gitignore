@@ -20,3 +20,6 @@ supabase/.temp/
 # Dependencies / build output (web tree has its own .gitignore for node_modules)
 node_modules/
 dist/
+
+# Local Netlify folder
+.netlify

@@ -3,6 +3,7 @@ import { cleanString, hmacSha256Hex, json, randomToken, rpc, RpcError, rpcErrorR
 
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
 const PUBLIC_APP_ORIGIN = new URL(Deno.env.get("CC_PUBLIC_DECISION_BASE_URL") ?? "https://blackrockai-command-center.netlify.app").origin;
+const CSRF_TTL_MS = 15 * 60_000;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return publicJson(req, { ok: true });
@@ -15,12 +16,15 @@ Deno.serve(async (req) => {
   if (!rawToken) return publicJson(req, { error: "token is required" }, 400);
   if (!sendId || !UUID_RE.test(sendId)) return publicJson(req, { error: "send_id is required" }, 400);
   if (!optionId) return publicJson(req, { error: "option_id is required" }, 400);
-  const csrf = randomToken(24);
+  // Signed CSRF token (no cookie) — payload binds the csrf to this exact
+  // send_id + option_id + expiry so it cannot be replayed across decisions
+  // or after expiry. Cookies don't work here because Safari ITP blocks
+  // cross-site cookies set by supabase.co for a netlify.app origin.
+  const csrf = await signCsrfToken(sendId, optionId);
   try {
     const tokenHash = await hmacSha256Hex(MAGIC_SECRET, `${sendId}:${optionId}:${rawToken}`);
     const data = await rpc("cc_get_decision_confirm_data", { p_token_hash: tokenHash, p_option_id: optionId });
     return publicJson(req, { ...data as Record<string, unknown>, csrf }, 200, {
-      "Set-Cookie": `cc_decision_csrf=${csrf}; Path=/; Max-Age=900; HttpOnly; Secure; SameSite=None`,
       "Cache-Control": "no-store",
     });
   } catch (e) {
@@ -28,6 +32,25 @@ Deno.serve(async (req) => {
     return publicJson(req, { error: "decision link read failed", detail: e instanceof Error ? e.message : String(e) }, 500);
   }
 });
+
+async function signCsrfToken(sendId: string, optionId: string): Promise<string> {
+  const payload = {
+    s: sendId,
+    o: optionId,
+    n: randomToken(12),
+    exp: Date.now() + CSRF_TTL_MS,
+  };
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const sig = await hmacSha256Hex(MAGIC_SECRET, payloadB64);
+  return `${payloadB64}.${sig}`;
+}
+
+function base64UrlEncode(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
 
 function publicJson(req: Request, body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return json(body, status, "noop", publicHeaders(req, headers));

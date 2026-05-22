@@ -15,12 +15,18 @@ Deno.serve(async (req) => {
   const rawToken = cleanString(body.token, 200);
   const sendId = cleanString(body.send_id, 80);
   const optionId = cleanString(body.option_id, 200);
-  const csrf = cleanString(body.csrf, 200);
-  const cookieCsrf = cookieValue(req.headers.get("Cookie") ?? "", "cc_decision_csrf");
+  const csrf = cleanString(body.csrf, 400);
   if (!rawToken) return publicJson(req, { error: "token is required" }, 400);
   if (!sendId || !UUID_RE.test(sendId)) return publicJson(req, { error: "send_id must be a valid uuid" }, 400);
   if (!optionId) return publicJson(req, { error: "option_id is required" }, 400);
-  if (!csrf || !cookieCsrf || csrf !== cookieCsrf) return publicJson(req, { error: "CSRF validation failed" }, 403);
+  if (!csrf) return publicJson(req, { error: "csrf is required" }, 403);
+
+  // Signed CSRF validation — Safari ITP blocks cross-site cookies set by
+  // supabase.co for a netlify.app origin, so we use a stateless signed token
+  // instead of a cookie+body match. The csrf payload binds to this exact
+  // send_id + option_id and includes an expiry to prevent replay.
+  const csrfCheck = await verifyCsrfToken(csrf, sendId, optionId);
+  if (!csrfCheck.ok) return publicJson(req, { error: `CSRF validation failed: ${csrfCheck.reason}` }, 403);
 
   try {
     const tokenHash = await hmacSha256Hex(MAGIC_SECRET, `${sendId}:${optionId}:${rawToken}`);
@@ -30,7 +36,6 @@ Deno.serve(async (req) => {
       p_actor: "client-magic-link",
     });
     return publicJson(req, { result }, 200, {
-      "Set-Cookie": "cc_decision_csrf=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None",
       "Cache-Control": "no-store",
     });
   } catch (e) {
@@ -38,6 +43,39 @@ Deno.serve(async (req) => {
     return publicJson(req, { error: "decision confirm failed", detail: e instanceof Error ? e.message : String(e) }, 500);
   }
 });
+
+async function verifyCsrfToken(token: string, expectedSendId: string, expectedOptionId: string): Promise<{ ok: boolean; reason: string }> {
+  const dot = token.lastIndexOf(".");
+  if (dot < 1 || dot >= token.length - 1) return { ok: false, reason: "malformed" };
+  const payloadB64 = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expectedSig = await hmacSha256Hex(MAGIC_SECRET, payloadB64);
+  if (!timingSafeEqual(sig, expectedSig)) return { ok: false, reason: "signature" };
+  let payload: { s?: unknown; o?: unknown; exp?: unknown };
+  try {
+    payload = JSON.parse(base64UrlDecode(payloadB64));
+  } catch {
+    return { ok: false, reason: "payload" };
+  }
+  if (payload.s !== expectedSendId) return { ok: false, reason: "send_id mismatch" };
+  if (payload.o !== expectedOptionId) return { ok: false, reason: "option_id mismatch" };
+  const exp = typeof payload.exp === "number" ? payload.exp : 0;
+  if (!exp || exp < Date.now()) return { ok: false, reason: "expired" };
+  return { ok: true, reason: "ok" };
+}
+
+function base64UrlDecode(value: string): string {
+  let b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  return atob(b64);
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i += 1) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return mismatch === 0;
+}
 
 function publicJson(req: Request, body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return json(body, status, "noop", publicHeaders(req, headers));
@@ -59,10 +97,4 @@ function publicHeaders(req: Request, extra: Record<string, string> = {}): Record
   };
 }
 
-function cookieValue(cookieHeader: string, name: string): string | null {
-  for (const part of cookieHeader.split(";")) {
-    const [k, ...rest] = part.trim().split("=");
-    if (k === name) return decodeURIComponent(rest.join("="));
-  }
-  return null;
-}
+
