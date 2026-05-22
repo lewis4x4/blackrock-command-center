@@ -33,6 +33,14 @@ const corsHeaders = {
 };
 
 // Source of truth (frontend): web/src/lib.ts LATELY_VISIBLE_EVENT_TYPES
+const HIDDEN_OPERATOR_NOISE_EVENT_TYPES: readonly string[] = [
+  "detail_read",
+  "agents_page_read",
+  "decisions_page_read",
+  "settings_page_read",
+  "secret_read",
+];
+
 const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   "snapshot_captured",
   "snapshot_failed",
@@ -134,6 +142,7 @@ function latelyMapping(eventType: string | null, registry: Record<string, unknow
     case "work_order_lease_expired":
     case "agents_page_read":
     case "decisions_page_read":
+    case "settings_page_read":
       return { visible: false, sentence: null, tone: "plain" };
     default:
       return { visible: LATELY_VISIBLE_EVENT_TYPES.includes(eventType ?? ""), sentence: null, tone: "plain" };
@@ -244,15 +253,42 @@ function parseLimit(raw: string | null): number {
   return n;
 }
 
-function parseLatelyOnly(raw: string | null): boolean {
-  if (raw == null || raw === "") return false;
+function parseBooleanParam(raw: string | null, name: string, defaultValue = false): boolean {
+  if (raw == null || raw === "") return defaultValue;
   const lower = raw.toLowerCase();
   if (lower === "true") return true;
   if (lower === "false") return false;
-  throw new Error("lately_only must be true or false");
+  throw new Error(`${name} must be true or false`);
 }
 
-function buildQuery(limit: number, cursor: CursorToken | null, latelyOnly: boolean): string {
+function parseLatelyOnly(raw: string | null): boolean {
+  return parseBooleanParam(raw, "lately_only", false);
+}
+
+function parseEventType(raw: string | null): string | null {
+  if (raw == null || raw.trim() === "") return null;
+  const value = raw.trim();
+  if (!/^[a-z0-9_:-]{1,80}$/i.test(value)) throw new Error("event_type contains unsupported characters");
+  return value;
+}
+
+function parseAppId(raw: string | null): string | null {
+  if (raw == null || raw.trim() === "") return null;
+  const value = raw.trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("app_id must be a valid uuid");
+  }
+  return value;
+}
+
+function parseSinceDate(raw: string | null): string | null {
+  if (raw == null || raw.trim() === "") return null;
+  const value = raw.trim();
+  if (Number.isNaN(Date.parse(value))) throw new Error("since_date must be a valid date or timestamp");
+  return value;
+}
+
+function buildQuery(limit: number, cursor: CursorToken | null, latelyOnly: boolean, filters: { appId: string | null; eventType: string | null; sinceDate: string | null; hideOperatorNoise: boolean }): string {
   const params = new URLSearchParams();
   params.set("select", "occurred_at,actor,event_type,detail,app_id,id,registry_apps(short_code,display_name)");
   params.append("order", "occurred_at.desc");
@@ -264,6 +300,11 @@ function buildQuery(limit: number, cursor: CursorToken | null, latelyOnly: boole
     // §5.9 invariant: exclude green snapshots from Lately mode.
     params.append("or", "(event_type.neq.snapshot_captured,detail->>build_status.neq.green)");
   }
+
+  if (filters.appId) params.append("app_id", `eq.${filters.appId}`);
+  if (filters.eventType) params.append("event_type", `eq.${filters.eventType}`);
+  else if (filters.hideOperatorNoise) params.append("event_type", `not.in.(${HIDDEN_OPERATOR_NOISE_EVENT_TYPES.join(",")})`);
+  if (filters.sinceDate) params.append("occurred_at", `gte.${filters.sinceDate}`);
 
   if (cursor) {
     params.append("or", `(occurred_at.lt.${cursor.occurred_at},and(occurred_at.eq.${cursor.occurred_at},id.lt.${cursor.id}))`);
@@ -291,10 +332,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let limit = 20;
   let latelyOnly = false;
   let cursor: CursorToken | null = null;
+  let appId: string | null = null;
+  let eventType: string | null = null;
+  let sinceDate: string | null = null;
+  let hideOperatorNoise = false;
   try {
     const url = new URL(req.url);
     limit = parseLimit(url.searchParams.get("limit"));
     latelyOnly = parseLatelyOnly(url.searchParams.get("lately_only"));
+    hideOperatorNoise = parseBooleanParam(url.searchParams.get("hide_operator_noise"), "hide_operator_noise", false);
+    appId = parseAppId(url.searchParams.get("app_id"));
+    eventType = parseEventType(url.searchParams.get("event_type"));
+    sinceDate = parseSinceDate(url.searchParams.get("since_date"));
     const rawCursor = url.searchParams.get("cursor");
     cursor = rawCursor ? decodeCursor(rawCursor) : null;
   } catch (e) {
@@ -304,7 +353,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   let rows: unknown[];
   try {
-    rows = await cpGet(buildQuery(limit, cursor, latelyOnly));
+    rows = await cpGet(buildQuery(limit, cursor, latelyOnly, { appId, eventType, sinceDate, hideOperatorNoise }));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "database read failed", detail: msg }, 500, access.headerValue);
@@ -353,6 +402,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     filters: {
       lately_only: latelyOnly,
       limit,
+      app_id: appId,
+      event_type: eventType,
+      since_date: sinceDate,
+      hide_operator_noise: hideOperatorNoise,
     },
   }, 200, access.headerValue);
 });

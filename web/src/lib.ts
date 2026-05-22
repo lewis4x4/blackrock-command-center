@@ -206,6 +206,56 @@ export interface AgentsPayload {
   generated_at?: string;
 }
 
+export type AuditEvent = ActivityEvent;
+export interface AuditPage {
+  events: AuditEvent[];
+  cursor: { next: string | null; has_more: boolean };
+  generated_at?: string;
+}
+
+export interface AccountInfo {
+  auth_mode: 'access_jwt' | 'read_token';
+  actor: string;
+  email: string | null;
+}
+export interface AggregatorSchedule {
+  jobname: string;
+  schedule: string;
+  active: boolean | null;
+  last_successful_at: string | null;
+  next_eta_at: string | null;
+}
+export type IntegrationStatus = 'live' | 'demo' | 'manual_safe' | 'planned';
+export interface IntegrationRow {
+  type: string | null;
+  status: IntegrationStatus;
+  last_verified_at: string | null;
+}
+export interface IntegrationsAppBreakdown {
+  app_id: string;
+  app_short_code: string;
+  app_display_name: string;
+  integrations: IntegrationRow[];
+}
+export interface IntegrationsInventory {
+  totals: Record<IntegrationStatus, number>;
+  by_app: IntegrationsAppBreakdown[];
+}
+export interface SecretInventory {
+  ref_name: string;
+  is_set: boolean;
+  app_short_code: string | null;
+  column: 'service_secret_ref' | 'readonly_secret_ref' | 'api_key_ref' | 'webhook_secret_ref' | 'vault';
+}
+export interface SettingsPayload {
+  account: AccountInfo;
+  aggregator: AggregatorSchedule;
+  integrations: IntegrationsInventory;
+  secrets: SecretInventory[];
+  audit_preview: AuditEvent[];
+  generated_at?: string;
+}
+
 // The DB-layer whitelist mirrors latelyLine()'s visible cases (§5.9 deck).
 // New visible event types must be added in BOTH places; new hidden types only
 // need to be omitted from this list. The client-side hide check stays as
@@ -467,7 +517,45 @@ export const DEMO_ACTIVITY: ActivityEvent[] = [
   { occurred_at: isoAgo(68),  short_code: 'QEP', actor: 'runner', event_type: 'cost_ceiling_hit', detail: { cap_usd: 5 } },
   { occurred_at: isoAgo(72),  actor: 'runner', event_type: 'runner_offline', detail: { runner_host: 'Mac Studio' } },
   { occurred_at: isoAgo(76),  short_code: 'QEP', actor: 'system', event_type: 'handoff_created', detail: { kind: 'manual_step' } },
+  { occurred_at: isoAgo(80),  actor: 'read-token:demo', event_type: 'settings_page_read', detail: { auth_mode: 'read_token' } },
 ];
+
+export const DEMO_SETTINGS: SettingsPayload = {
+  generated_at: new Date().toISOString(),
+  account: {
+    auth_mode: 'read_token',
+    actor: 'read-token:demo',
+    email: null,
+  },
+  aggregator: {
+    jobname: 'cc-aggregator-5min',
+    schedule: '*/5 * * * *',
+    active: true,
+    last_successful_at: isoAgo(2),
+    next_eta_at: isoAgo(-3),
+  },
+  integrations: {
+    totals: { live: 3, demo: 1, manual_safe: 2, planned: 8 },
+    by_app: DEMO_APPS.map((app, index) => ({
+      app_id: app.id,
+      app_short_code: app.short_code,
+      app_display_name: app.display_name,
+      integrations: [
+        { type: index === 0 ? 'linear' : 'github', status: index === 0 ? 'live' : 'planned', last_verified_at: index === 0 ? isoAgo(8) : null },
+        { type: index === 0 ? 'm365' : 'supabase', status: index === 1 ? 'demo' : index === 2 ? 'manual_safe' : 'planned', last_verified_at: index === 1 ? isoAgo(90) : null },
+      ] as IntegrationRow[],
+    })),
+  },
+  secrets: [
+    { ref_name: 'aggregator_token', is_set: true, app_short_code: null, column: 'vault' },
+    { ref_name: 'SVC_KEY_QEP', is_set: false, app_short_code: 'QEP', column: 'service_secret_ref' },
+    { ref_name: 'READ_KEY_QEP', is_set: true, app_short_code: 'QEP', column: 'readonly_secret_ref' },
+    { ref_name: 'LINEAR_API_KEY_QEP', is_set: true, app_short_code: 'QEP', column: 'api_key_ref' },
+    { ref_name: 'LINEAR_WEBHOOK_QEP', is_set: false, app_short_code: 'QEP', column: 'webhook_secret_ref' },
+    { ref_name: 'READ_KEY_SCC', is_set: false, app_short_code: 'SCC', column: 'readonly_secret_ref' },
+  ],
+  audit_preview: DEMO_ACTIVITY.slice(0, 10),
+};
 
 /* ───────────────────── Data loaders ─────────────────────────────────────── */
 
@@ -650,10 +738,95 @@ function parseActivityEvent(value: unknown): ActivityEvent {
 }
 
 function parseAuditResponse(value: unknown): ActivityEvent[] {
+  return parseAuditPage(value).events;
+}
+
+function parseAuditPage(value: unknown): AuditPage {
   if (!isRecord(value) || !Array.isArray(value.events) || !asString(value.generated_at)) {
     throw new Error('cc-read-audit payload is invalid');
   }
-  return value.events.map(parseActivityEvent);
+  const cursor = asRecord(value.cursor);
+  return {
+    events: value.events.map(parseActivityEvent),
+    cursor: {
+      next: asString(cursor.next),
+      has_more: cursor.has_more === true,
+    },
+    generated_at: asString(value.generated_at) ?? undefined,
+  };
+}
+
+function parseIntegrationStatus(value: unknown): IntegrationStatus {
+  const raw = asString(value);
+  if (raw === 'live' || raw === 'demo' || raw === 'manual_safe' || raw === 'planned') return raw;
+  return 'planned';
+}
+
+function parseIntegrationsInventory(value: unknown): IntegrationsInventory {
+  const rec = asRecord(value);
+  const totals = asRecord(rec.totals);
+  return {
+    totals: {
+      live: asNumber(totals.live) ?? 0,
+      demo: asNumber(totals.demo) ?? 0,
+      manual_safe: asNumber(totals.manual_safe) ?? 0,
+      planned: asNumber(totals.planned) ?? 0,
+    },
+    by_app: Array.isArray(rec.by_app) ? rec.by_app.map((item) => {
+      const app = asRecord(item);
+      return {
+        app_id: asString(app.app_id) ?? '',
+        app_short_code: asString(app.app_short_code) ?? '',
+        app_display_name: asString(app.app_display_name) ?? '',
+        integrations: Array.isArray(app.integrations) ? app.integrations.map((row) => {
+          const integration = asRecord(row);
+          return {
+            type: asString(integration.type),
+            status: parseIntegrationStatus(integration.status),
+            last_verified_at: asString(integration.last_verified_at),
+          };
+        }) : [],
+      };
+    }) : [],
+  };
+}
+
+function parseSecretInventory(value: unknown): SecretInventory {
+  const rec = asRecord(value);
+  const column = asString(rec.column);
+  return {
+    ref_name: asString(rec.ref_name) ?? '',
+    is_set: rec.is_set === true,
+    app_short_code: asString(rec.app_short_code),
+    column: column === 'service_secret_ref' || column === 'readonly_secret_ref' || column === 'api_key_ref' || column === 'webhook_secret_ref' || column === 'vault' ? column : 'vault',
+  };
+}
+
+function parseSettingsPayload(value: unknown): SettingsPayload {
+  if (!isRecord(value) || !isRecord(value.account) || !isRecord(value.aggregator) || !isRecord(value.integrations) || !Array.isArray(value.secrets)) {
+    throw new Error('cc-read-settings payload is invalid');
+  }
+  const account = asRecord(value.account);
+  const aggregator = asRecord(value.aggregator);
+  const mode = asString(account.auth_mode);
+  return {
+    account: {
+      auth_mode: mode === 'access_jwt' ? 'access_jwt' : 'read_token',
+      actor: asString(account.actor) ?? 'unknown',
+      email: asString(account.email),
+    },
+    aggregator: {
+      jobname: asString(aggregator.jobname) ?? 'cc-aggregator-5min',
+      schedule: asString(aggregator.schedule) ?? '*/5 * * * *',
+      active: typeof aggregator.active === 'boolean' ? aggregator.active : null,
+      last_successful_at: asString(aggregator.last_successful_at),
+      next_eta_at: asString(aggregator.next_eta_at),
+    },
+    integrations: parseIntegrationsInventory(value.integrations),
+    secrets: value.secrets.map(parseSecretInventory).filter((secret) => secret.ref_name),
+    audit_preview: Array.isArray(value.audit_preview) ? value.audit_preview.map(parseActivityEvent) : [],
+    generated_at: asString(value.generated_at) ?? undefined,
+  };
 }
 
 function parseAgentAppIdentity(value: unknown): AgentAppIdentity {
@@ -823,13 +996,36 @@ export async function loadActivity(demo: boolean): Promise<ActivityEvent[]> {
   return parseAuditResponse(await fetchJson('cc-read-audit', params));
 }
 
+export async function loadAuditPage(demo: boolean, cursor?: string | null, filters: { app_id?: string; event_type?: string; since_date?: string } = {}): Promise<AuditPage> {
+  if (demo) {
+    const hidden = new Set(['detail_read', 'agents_page_read', 'decisions_page_read', 'settings_page_read', 'secret_read']);
+    const events = structuredClone(DEMO_ACTIVITY).filter((ev) => !hidden.has(ev.event_type));
+    return { events, cursor: { next: null, has_more: false }, generated_at: new Date().toISOString() };
+  }
+  const params = new URLSearchParams();
+  params.set('lately_only', 'false');
+  params.set('limit', '20');
+  if (cursor) params.set('cursor', cursor);
+  if (filters.app_id) params.set('app_id', filters.app_id);
+  if (filters.event_type) params.set('event_type', filters.event_type);
+  if (filters.since_date) params.set('since_date', filters.since_date);
+  params.set('hide_operator_noise', 'true');
+  return parseAuditPage(await fetchJson('cc-read-audit', params));
+}
+
 /* SOURCE 3 — cc-read-agents (Agents nav page queue/run/cost read surface). */
 export async function loadAgents(demo: boolean): Promise<AgentsPayload> {
   if (demo) return structuredClone(DEMO_AGENTS);
   return parseAgentsResponse(await fetchJson('cc-read-agents'));
 }
 
-/* SOURCE 4 — cc-read-app (registry/config drilldown placeholder). */
+/* SOURCE 4 — cc-read-settings (Settings nav page five-band envelope). */
+export async function loadSettings(demo: boolean): Promise<SettingsPayload> {
+  if (demo) return structuredClone(DEMO_SETTINGS);
+  return parseSettingsPayload(await fetchJson('cc-read-settings'));
+}
+
+/* SOURCE 5 — cc-read-app (registry/config drilldown placeholder). */
 export async function loadAppDetail(appId: string): Promise<unknown> {
   const params = new URLSearchParams();
   params.set('app_id', appId);
@@ -1041,6 +1237,8 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
     case 'secret_read':
     case 'detail_read':
     case 'agents_page_read':
+    case 'decisions_page_read':
+    case 'settings_page_read':
     case 'issue_acknowledged':
     case 'issue_dismissed':
       return ['', false];

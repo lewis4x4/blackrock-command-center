@@ -9,6 +9,7 @@ import { AppDetailView } from './AppDetail';
 import { AgentsView, type AgentsViewHandle } from './Agents';
 import { DecisionsView, type DecisionsViewHandle } from './Decisions';
 import { AppsView } from './Apps';
+import { SettingsView, type SettingsViewHandle } from './Settings';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
@@ -16,6 +17,7 @@ type LoadState = 'loading' | 'error' | 'ready';
 function pageFromHash(): ShellPage {
   const hash = window.location.hash || '#/';
   if (hash === '#/decisions') return 'decisions';
+  if (hash === '#/settings') return 'settings';
   if (hash === '#/agents') return 'agents';
   if (hash === '#/files') return 'files';
   const appMatch = hash.match(/^#\/apps\/([a-z0-9_-]+)$/i);
@@ -26,6 +28,7 @@ function pageFromHash(): ShellPage {
 
 function hashForPage(page: ShellPage): string {
   if (page === 'decisions') return '#/decisions';
+  if (page === 'settings') return '#/settings';
   if (page === 'agents') return '#/agents';
   if (page === 'apps') return '#/apps';
   if (page === 'files') return '#/files';
@@ -48,6 +51,7 @@ export default function App() {
   const filesRef = useRef<FilesViewHandle | null>(null);
   const agentsRef = useRef<AgentsViewHandle | null>(null);
   const decisionsRef = useRef<DecisionsViewHandle | null>(null);
+  const settingsRef = useRef<SettingsViewHandle | null>(null);
 
   useEffect(() => {
     void load();
@@ -90,6 +94,10 @@ export default function App() {
       await decisionsRef.current?.refresh();
       return;
     }
+    if (page === 'settings') {
+      await settingsRef.current?.refresh();
+      return;
+    }
     await load();
   }
 
@@ -107,6 +115,8 @@ export default function App() {
         <AgentsView ref={agentsRef} demo={INITIAL_DEMO} />
       ) : page === 'decisions' ? (
         <DecisionsView ref={decisionsRef} demo={INITIAL_DEMO} />
+      ) : page === 'settings' ? (
+        <SettingsView ref={settingsRef} demo={INITIAL_DEMO} />
       ) : page === 'apps' ? (
         <>
           {loadState === 'loading' && <Loading />}

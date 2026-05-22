@@ -1,0 +1,354 @@
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from 'react';
+import {
+  ago, colorFor, loadAuditPage, loadSettings,
+  type ActivityEvent, type AggregatorSchedule, type AuditPage, type IntegrationsAppBreakdown,
+  type IntegrationStatus, type SecretInventory, type SettingsPayload,
+} from './lib';
+
+export type SettingsViewHandle = {
+  refresh: () => Promise<void>;
+};
+
+type LoadState = 'loading' | 'ready' | 'error';
+
+const GITHUB_APP_URL = 'https://github.com/settings/apps/3803517';
+const ACCESS_DOC_URL = 'https://github.com/lewis4x4/blackrock-command-center/blob/main/docs/CLOUDFLARE_ACCESS_SETUP.md';
+const HIDDEN_AUDIT_EVENTS = new Set(['detail_read', 'agents_page_read', 'decisions_page_read', 'settings_page_read', 'secret_read']);
+const STATUS_ORDER: IntegrationStatus[] = ['live', 'demo', 'manual_safe', 'planned'];
+
+const emptySettings: SettingsPayload = {
+  account: { auth_mode: 'read_token', actor: 'unknown', email: null },
+  aggregator: { jobname: 'cc-aggregator-5min', schedule: '*/5 * * * *', active: null, last_successful_at: null, next_eta_at: null },
+  integrations: { totals: { live: 0, demo: 0, manual_safe: 0, planned: 0 }, by_app: [] },
+  secrets: [],
+  audit_preview: [],
+};
+
+const emptyAudit: AuditPage = { events: [], cursor: { next: null, has_more: false } };
+
+export const SettingsView = forwardRef<SettingsViewHandle, { demo: boolean }>(function SettingsView({ demo }, ref) {
+  const [state, setState] = useState<LoadState>('loading');
+  const [payload, setPayload] = useState<SettingsPayload>(emptySettings);
+  const [audit, setAudit] = useState<AuditPage>(emptyAudit);
+  const [error, setError] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  async function refresh() {
+    setState('loading');
+    setError('');
+    try {
+      const [settings, auditPage] = await Promise.all([
+        loadSettings(demo),
+        loadAuditPage(demo),
+      ]);
+      setPayload(settings);
+      setAudit(filterAuditPage(auditPage));
+      setState('ready');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPayload(emptySettings);
+      setAudit(emptyAudit);
+      setState('error');
+    }
+  }
+
+  async function loadMore() {
+    if (!audit.cursor.next) return;
+    setLoadingMore(true);
+    try {
+      const next = filterAuditPage(await loadAuditPage(demo, audit.cursor.next));
+      setAudit((current) => ({
+        events: [...current.events, ...next.events],
+        cursor: next.cursor,
+        generated_at: next.generated_at,
+      }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  useImperativeHandle(ref, () => ({ refresh }));
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo]);
+
+  return (
+    <div className="settings-page">
+      <SettingsHeader loading={state === 'loading'} generatedAt={payload.generated_at} payload={payload} onRefresh={refresh} />
+      {state === 'error' && <div className="detail-note error">Settings read failed: {error}</div>}
+      <AccountBand payload={payload} loading={state === 'loading'} />
+      <AggregatorBand schedule={payload.aggregator} loading={state === 'loading'} />
+      <IntegrationsBand apps={payload.integrations.by_app} totals={payload.integrations.totals} loading={state === 'loading'} />
+      <SecretsBand secrets={payload.secrets} loading={state === 'loading'} />
+      <AuditBand audit={audit} loading={state === 'loading'} loadingMore={loadingMore} onLoadMore={loadMore} />
+    </div>
+  );
+});
+
+function SettingsHeader({ loading, generatedAt, payload, onRefresh }: { loading: boolean; generatedAt?: string; payload: SettingsPayload; onRefresh: () => void | Promise<void> }) {
+  const secretSet = payload.secrets.filter((secret) => secret.is_set).length;
+  const integrationTotal = STATUS_ORDER.reduce((total, status) => total + payload.integrations.totals[status], 0);
+  return (
+    <section className="agents-hero settings-hero">
+      <div className="agents-hero-copy">
+        <div className="detail-eyebrow">Settings</div>
+        <h1>Control-plane configuration</h1>
+        <p>Read-only account, schedule, integrations, secret pointers, and audit trail. Secret values never leave the edge runtime.</p>
+      </div>
+      <div className="agents-hero-actions">
+        <span className="detail-key">Updated {ago(generatedAt) ?? '—'}</span>
+        <button className={'refresh' + (loading ? ' spin' : '')} onClick={() => void onRefresh()} disabled={loading}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
+          {loading ? 'Refreshing…' : 'Refresh settings'}
+        </button>
+      </div>
+      <div className="agents-metrics settings-metrics">
+        <Metric label="Secret refs set" value={`${secretSet} / ${payload.secrets.length}`} tone={secretSet === payload.secrets.length && payload.secrets.length ? 'green' : 'amber'} />
+        <Metric label="Integrations" value={String(integrationTotal)} />
+        <Metric label="Audit preview" value={String(payload.audit_preview.length)} />
+      </div>
+    </section>
+  );
+}
+
+function AccountBand({ payload, loading }: { payload: SettingsPayload; loading: boolean }) {
+  const via = payload.account.auth_mode === 'access_jwt' ? 'via Cloudflare Access' : 'via operator read token';
+  return (
+    <SettingsSection num="1" title="Account" subtitle="Identity is resolved by the edge function. No logout or password controls live here." count={1}>
+      {loading ? <SkeletonRows /> : (
+        <div className="settings-account-card">
+          <div>
+            <div className="settings-primary">Signed in as <b>{payload.account.actor}</b> <span>({via})</span></div>
+            {payload.account.email && <div className="settings-muted">Access email: {payload.account.email}</div>}
+          </div>
+          <div className="settings-link-row">
+            <a href={GITHUB_APP_URL} target="_blank" rel="noreferrer">Manage GitHub App →</a>
+            <a href={ACCESS_DOC_URL} target="_blank" rel="noreferrer">Cloudflare Access setup →</a>
+          </div>
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
+function AggregatorBand({ schedule, loading }: { schedule: AggregatorSchedule; loading: boolean }) {
+  const healthy = schedule.active !== false && freshnessOk(schedule.last_successful_at);
+  return (
+    <SettingsSection num="2" title="Aggregator" subtitle="pg_cron schedule read server-side. The cron command is intentionally not exposed." count={1}>
+      {loading ? <SkeletonRows /> : (
+        <div className="settings-aggregator-grid">
+          <div className="settings-cron-card">
+            <span>Cron expression</span>
+            <b>{schedule.schedule}</b>
+          </div>
+          <InfoCard label="Jobname" value={schedule.jobname} />
+          <InfoCard label="Last run" value={schedule.last_successful_at ? ago(schedule.last_successful_at) ?? 'just now' : '—'} dot={healthy ? 'green' : 'red'} />
+          <InfoCard label="Next ETA" value={etaLabel(schedule.next_eta_at)} />
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
+function IntegrationsBand({ apps, totals, loading }: { apps: IntegrationsAppBreakdown[]; totals: Record<IntegrationStatus, number>; loading: boolean }) {
+  const [openApp, setOpenApp] = useState<string | null>(null);
+  return (
+    <SettingsSection num="3" title="Integrations" subtitle="Cross-app integration counts by status, plus per-app drill-down." count={apps.length}>
+      {loading ? <SkeletonRows /> : (
+        <>
+          <div className="settings-status-grid">
+            {STATUS_ORDER.map((status) => <StatusTile key={status} status={status} value={totals[status]} />)}
+          </div>
+          <div className="settings-app-list">
+            {apps.length === 0 ? <Empty title="No integrations" copy="No registry integration rows have been added yet." /> : apps.map((app) => {
+              const open = openApp === app.app_id;
+              return (
+                <button className="settings-app-row" key={app.app_id} onClick={() => setOpenApp(open ? null : app.app_id)}>
+                  <div className="agents-app">
+                    <span className="badge" style={{ background: colorFor(app.app_short_code) }}>{app.app_short_code[0]}</span>
+                    <div><b>{app.app_display_name}</b><span>{app.app_short_code}</span></div>
+                  </div>
+                  <span className="settings-muted">{app.integrations.length} integration{app.integrations.length === 1 ? '' : 's'}</span>
+                  {open && (
+                    <div className="settings-integration-panel">
+                      {app.integrations.map((integration, index) => (
+                        <div className="settings-integration-row" key={`${integration.type ?? 'integration'}-${index}`}>
+                          <b>{integration.type ?? 'unknown'}</b>
+                          <span className={'status-chip ' + integration.status}>{label(integration.status)}</span>
+                          <em>{integration.last_verified_at ? `Verified ${ago(integration.last_verified_at) ?? 'recently'} ago` : 'Not verified yet'}</em>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </SettingsSection>
+  );
+}
+
+function SecretsBand({ secrets, loading }: { secrets: SecretInventory[]; loading: boolean }) {
+  const global = secrets.filter((secret) => !secret.app_short_code);
+  const groups = useMemo(() => {
+    const map = new Map<string, SecretInventory[]>();
+    for (const secret of secrets.filter((item) => item.app_short_code)) {
+      const key = secret.app_short_code ?? 'APP';
+      map.set(key, [...(map.get(key) ?? []), secret]);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [secrets]);
+
+  return (
+    <SettingsSection num="4" title="Secrets" subtitle="Pointer inventory only. Zero inputs, zero buttons, zero secret values." count={secrets.length}>
+      {loading ? <SkeletonRows /> : secrets.length === 0 ? <Empty title="No secret refs" copy="Secret pointer rows will appear after apps are registered." /> : (
+        <div className="settings-secret-groups">
+          {global.length > 0 && <SecretGroup title="Global" secrets={global} />}
+          {groups.map(([app, rows]) => <SecretGroup key={app} title={app} secrets={rows} />)}
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
+function AuditBand({ audit, loading, loadingMore, onLoadMore }: { audit: AuditPage; loading: boolean; loadingMore: boolean; onLoadMore: () => void | Promise<void> }) {
+  return (
+    <SettingsSection num="5" title="Audit log" subtitle="Append-only stream. Telemetry reads and secret-read noise are hidden from this operator view." count={audit.events.length}>
+      {loading ? <SkeletonRows /> : audit.events.length === 0 ? <Empty title="No audit rows" copy="The audit log is quiet after telemetry filtering." /> : (
+        <>
+          <div className="settings-audit-list">
+            {audit.events.map((event, index) => <AuditRow key={`${event.occurred_at}-${event.event_type}-${index}`} event={event} />)}
+          </div>
+          {audit.cursor.has_more && (
+            <div className="settings-load-more">
+              <button className="ghost-btn" onClick={() => void onLoadMore()} disabled={loadingMore}>{loadingMore ? 'Loading…' : 'Load more'}</button>
+            </div>
+          )}
+        </>
+      )}
+    </SettingsSection>
+  );
+}
+
+function SettingsSection({ num, title, subtitle, count, children }: { num: string; title: string; subtitle: string; count: number; children: ReactNode }) {
+  return (
+    <section className="band agents-section settings-section">
+      <div className="band-head">
+        <span className="band-num">{num}</span>
+        <div>
+          <div className="band-title">{title}</div>
+          <div className="band-sub">{subtitle}</div>
+        </div>
+        <span className="count-chip">{count}</span>
+      </div>
+      <div className="agents-section-body settings-section-body">{children}</div>
+    </section>
+  );
+}
+
+function SecretGroup({ title, secrets }: { title: string; secrets: SecretInventory[] }) {
+  return (
+    <div className="settings-secret-group">
+      <div className="settings-secret-title">{title}</div>
+      <div className="settings-secret-chips">
+        {secrets.map((secret) => (
+          <div className="settings-secret-chip" key={`${title}-${secret.column}-${secret.ref_name}`}>
+            <span className="dot" style={{ background: secret.is_set ? 'var(--green)' : 'var(--grey)' }} />
+            <b>{secret.ref_name}</b>
+            <em>{secret.is_set ? 'SET' : 'NOT-SET'}</em>
+            <small>{label(secret.column)}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AuditRow({ event }: { event: ActivityEvent }) {
+  return (
+    <div className="settings-audit-row">
+      <div className="feed-ico">{event.short_code?.[0] ?? '•'}</div>
+      <div className="feed-text">
+        <div className="feed-title">{label(event.event_type)}{event.short_code ? ` · ${event.short_code}` : ''}</div>
+        <div className="feed-meta">{event.actor} · {detailPreview(event.detail)}</div>
+      </div>
+      <div className="feed-time">{ago(event.occurred_at) ?? '—'} ago</div>
+    </div>
+  );
+}
+
+function StatusTile({ status, value }: { status: IntegrationStatus; value: number }) {
+  return (
+    <div className={'settings-status-tile ' + status}>
+      <span>{label(status)}</span>
+      <b>{value}</b>
+    </div>
+  );
+}
+
+function InfoCard({ label: title, value, dot }: { label: string; value: string; dot?: 'green' | 'red' }) {
+  return (
+    <div className="settings-info-card">
+      <span>{title}</span>
+      <b>{dot && <i className="dot" style={{ background: dot === 'green' ? 'var(--green)' : 'var(--red)' }} />}{value}</b>
+    </div>
+  );
+}
+
+function Metric({ label: title, value, tone = '' }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="detail-metric">
+      <span>{title}</span>
+      <b className={tone}>{value}</b>
+    </div>
+  );
+}
+
+function Empty({ title, copy }: { title: string; copy: string }) {
+  return <div className="detail-placeholder agents-empty"><b>{title}</b><span>{copy}</span></div>;
+}
+
+function SkeletonRows() {
+  return (
+    <div className="agents-skeleton">
+      {Array.from({ length: 3 }).map((_, i) => <div className="skel" key={i} style={{ height: 54 }} />)}
+    </div>
+  );
+}
+
+function filterAuditPage(page: AuditPage): AuditPage {
+  return { ...page, events: page.events.filter((event) => !HIDDEN_AUDIT_EVENTS.has(event.event_type)) };
+}
+
+function freshnessOk(value: string | null): boolean {
+  if (!value) return false;
+  const t = Date.parse(value);
+  if (Number.isNaN(t)) return false;
+  return Date.now() - t < 12 * 60_000;
+}
+
+function etaLabel(value: string | null): string {
+  if (!value) return '—';
+  const delta = Date.parse(value) - Date.now();
+  if (Number.isNaN(delta)) return '—';
+  if (delta <= 0) return 'due now';
+  const minutes = Math.max(1, Math.round(delta / 60_000));
+  return `~${minutes}m`;
+}
+
+function detailPreview(detail: Record<string, unknown> | null): string {
+  if (!detail) return 'no detail';
+  const keys = Object.keys(detail).filter((key) => !/secret|token|key/i.test(key)).slice(0, 3);
+  if (keys.length === 0) return 'detail hidden';
+  return keys.map((key) => `${key}: ${String(detail[key]).slice(0, 40)}`).join(' · ');
+}
+
+function label(value: string): string {
+  return value.replace(/_/g, ' ');
+}
