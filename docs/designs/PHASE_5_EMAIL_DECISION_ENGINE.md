@@ -790,7 +790,7 @@ Once secrets are in place + the Slice 1 functions are deployed:
 
 ### Slice 3 — Reminders + auto-clarify + polish
 
-- [ ] **Cron functions**: `cc-decision-reminder` (every 6h), `cc-decision-expire` (every hour), `cc-auto-clarify` (every 6h).
+- [ ] **Cron functions**: `cc-decision-reminder` (every 6h — sends ONE reminder at the 2-day mark, never a second), `cc-decision-expire` (every hour), `cc-auto-clarify` (every 6h).
 - [ ] **Reminder + clarify email copy** per §9.
 - [ ] **Settings page**: surface Phase 5 row counts (sent / awaiting / answered / bounced / expired this week).
 - [ ] **Live smoke**: route a decision, fast-forward `replied_at` and clear `llm_extraction.matched_option_id`, verify the clarify follow-up fires and audit captures.
@@ -809,9 +809,9 @@ Most are locked. Remaining:
 | 4 | Multi-recipient handling | ✅ **LOCKED — `registry_app_decision_recipients` table; QEP = Rylee + Ryan** |
 | 5 | AI-rewrite step before send | ✅ **LOCKED — yes, with operator preview/approve** |
 | 6 | Auto-clarification loop | ✅ **LOCKED — capped at 1 follow-up, then operator queue** |
-| 7 | Reminder cadence | Recommend 3-day default, max 2 reminders, expire 7d. Accept or override. |
-| 8 | Confirm-page deployment target | Recommend Netlify under the existing Command Center site. Accept or override. |
-| 9 | First friendly-client recipient | Already decided indirectly — QEP's Rylee + Ryan via the first real route. (You smoke-test to yourself first, then routes to them.) |
+| 7 | Reminder cadence | ✅ **LOCKED — one reminder at 2 days, expire at 7 days. No second reminder.** |
+| 8 | Confirm-page deployment target | ✅ **LOCKED — Netlify under existing Command Center site** |
+| 9 | First friendly-client recipient | ✅ **LOCKED — smoke-test to operator's own inbox ONCE; all subsequent routes go directly to per-app recipients (no auto-CC operator)** |
 
 ---
 
