@@ -31,7 +31,7 @@ const chevron = (
 /* ============================================================================
    SHELL — left rail + topbar, wraps every view
    ============================================================================ */
-export type ShellPage = 'home' | 'decisions' | 'agents' | 'files' | `app:${string}`;
+export type ShellPage = 'home' | 'decisions' | 'agents' | 'apps' | 'files' | `app:${string}`;
 
 export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children }: {
   demo: boolean;
@@ -78,7 +78,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
         </div>
         <nav>
           {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Settings'] as const).map((name) => {
-            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Files' ? 'files' : null;
+            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Apps' ? 'apps' : name === 'Files' ? 'files' : null;
             const active = page === activePage;
             return (
               <button
@@ -104,7 +104,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
       <div className="main">
         <div className="topbar">
           <div className="topbar-inner">
-          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'decisions' ? 'Decisions' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
+          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'apps' ? 'Apps' : activePage === 'decisions' ? 'Decisions' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
               <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />
@@ -343,17 +343,23 @@ function ProjectsBand({ apps }: { apps: AppRow[] }) {
           <div className="band-sub">Every registered app — health, progress, freshness</div>
         </div>
         <div className="band-action">
-          <button className="ghost-btn" onClick={() => stub('Apps')}>View all apps {chevron}</button>
+          <button className="ghost-btn" onClick={() => { window.location.hash = '#/apps'; }}>View all apps {chevron}</button>
         </div>
       </div>
-      <div className="grid">
-        {apps.map((a) => <AppCard key={a.id} app={a} />)}
-      </div>
+      <ProjectGrid apps={apps} />
     </section>
   );
 }
 
-function AppCard({ app }: { app: AppRow }) {
+export function ProjectGrid({ apps, onEdit }: { apps: AppRow[]; onEdit?: (app: AppRow) => void }) {
+  return (
+    <div className="grid">
+      {apps.map((a) => <AppCard key={a.id} app={a} onEdit={onEdit} />)}
+    </div>
+  );
+}
+
+function AppCard({ app, onEdit }: { app: AppRow; onEdit?: (app: AppRow) => void }) {
   const head = (
     <div className="card-head">
       <div className="badge" style={{ background: colorFor(app.short_code) }}>{app.short_code[0]}</div>
@@ -363,6 +369,11 @@ function AppCard({ app }: { app: AppRow }) {
           {app.sample && <span className="sample-tag">SAMPLE</span>}
         </div>
       </div>
+      {onEdit && (
+        <button className="external-link app-edit-link" title={`Edit ${app.short_code} basics`} onClick={() => onEdit(app)} aria-label={`Edit ${app.short_code} basics`}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>
+        </button>
+      )}
       <span className={'pill ' + app.status}>{app.status.toUpperCase()}</span>
     </div>
   );

@@ -214,6 +214,7 @@ export const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   'snapshot_captured',
   'snapshot_failed',
   'app_provisioned',
+  'app_updated',
   'decision_answered',
   'issue_resolved',
   'decision_routed',
@@ -1035,6 +1036,8 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
     }
     case 'app_provisioned':
       return [`${app} was added to the Command Center.`, true];
+    case 'app_updated':
+      return [`${app}'s registry basics were updated.`, true];
     case 'secret_read':
     case 'detail_read':
     case 'agents_page_read':
@@ -1123,6 +1126,64 @@ export function latelyTone(ev: ActivityEvent): LatelyTone {
 export function activityLine(ev: ActivityEvent): [string, string] {
   const [sentence] = latelyLine(ev);
   return [sentence, ''];
+}
+
+// ===== Apps =====
+export type EditAppPayload = Partial<Pick<AppRow, 'display_name' | 'app_url' | 'criticality'>>;
+
+export interface RegisterAppPayload {
+  short_code: string;
+  display_name: string;
+  project_ref: string;
+  project_url: string;
+  service_secret_ref: string;
+  github_repo: string;
+  readonly_secret_ref?: string | null;
+}
+
+function parseAppWriteResponse(value: unknown): AppRow {
+  const rec = asRecord(value);
+  return parseAppRow(rec.app ?? value);
+}
+
+export async function editAppBasics(appId: string, changes: EditAppPayload, demo = false): Promise<AppRow> {
+  if (demo) {
+    const app = DEMO_APPS.find((row) => row.id === appId);
+    if (!app) throw new Error('demo app not found');
+    if (changes.display_name !== undefined) app.display_name = changes.display_name;
+    if (changes.app_url !== undefined) app.app_url = changes.app_url;
+    if (changes.criticality !== undefined) app.criticality = changes.criticality;
+    return structuredClone(app);
+  }
+  return parseAppWriteResponse(await postJson('cc-edit-app', { app_id: appId, changes }));
+}
+
+export async function registerApp(payload: RegisterAppPayload, demo = false): Promise<AppRow> {
+  if (demo) {
+    const shortCode = payload.short_code.trim().toUpperCase();
+    if (DEMO_APPS.some((app) => app.short_code.toUpperCase() === shortCode)) throw new Error('demo app short_code already exists');
+    const app: AppRow = {
+      id: `demo-${shortCode.toLowerCase()}`,
+      short_code: shortCode,
+      display_name: payload.display_name.trim(),
+      client_name: null,
+      app_url: null,
+      status: 'provisioning',
+      lifecycle_phase: 'build',
+      criticality: 0,
+      last_snapshot_at: null,
+      build_status: 'unknown',
+      roadmap_counts: {},
+      decision_counts: {},
+      sync_health: {},
+      integrations: {},
+      momentum: {},
+      sample: true,
+    };
+    DEMO_APPS.push(app);
+    return structuredClone(app);
+  }
+  return parseAppWriteResponse(await postJson('cc-register-app', payload));
 }
 
 // ===== Decisions =====

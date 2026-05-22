@@ -8,6 +8,7 @@ import { FilesView, type FilesViewHandle } from './Files';
 import { AppDetailView } from './AppDetail';
 import { AgentsView, type AgentsViewHandle } from './Agents';
 import { DecisionsView, type DecisionsViewHandle } from './Decisions';
+import { AppsView } from './Apps';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
@@ -17,14 +18,16 @@ function pageFromHash(): ShellPage {
   if (hash === '#/decisions') return 'decisions';
   if (hash === '#/agents') return 'agents';
   if (hash === '#/files') return 'files';
-  const appMatch = hash.match(/^#\/apps\/([a-z0-9-]+)$/i);
+  const appMatch = hash.match(/^#\/apps\/([a-z0-9_-]+)$/i);
   if (appMatch?.[1]) return `app:${appMatch[1].toLowerCase()}`;
+  if (hash === '#/apps') return 'apps';
   return 'home';
 }
 
 function hashForPage(page: ShellPage): string {
   if (page === 'decisions') return '#/decisions';
   if (page === 'agents') return '#/agents';
+  if (page === 'apps') return '#/apps';
   if (page === 'files') return '#/files';
   if (page.startsWith('app:')) return `#/apps/${page.slice(4)}`;
   return '#/';
@@ -104,6 +107,12 @@ export default function App() {
         <AgentsView ref={agentsRef} demo={INITIAL_DEMO} />
       ) : page === 'decisions' ? (
         <DecisionsView ref={decisionsRef} demo={INITIAL_DEMO} />
+      ) : page === 'apps' ? (
+        <>
+          {loadState === 'loading' && <Loading />}
+          {loadState === 'error' && <ErrorState message={err} onRetry={load} />}
+          {loadState === 'ready' && <AppsView apps={apps} demo={INITIAL_DEMO} onChanged={load} />}
+        </>
       ) : slugFromPage(page) ? (
         <>
           {loadState === 'loading' && <Loading />}
