@@ -227,9 +227,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         {emailState && <span className={'decision-state-badge ' + emailState}>{emailState.replace(/_/g, ' ')}</span>}
       </div>
       <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
-      {owner === 'client' && (
-        <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to client</span>
-      )}
+      <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</span>
     </button>
   );
 }

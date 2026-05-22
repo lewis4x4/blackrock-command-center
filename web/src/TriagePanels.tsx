@@ -140,11 +140,16 @@ export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showR
               const id = rowId(row);
               const opts = optionsFor(row);
               return (
-                <button key={id} className={'panel-card decision-choice' + (flow.selected && id === rowId(flow.selected) ? ' selected' : '')} onClick={() => flow.setSelectedId(id)}>
-                  <b>{rowTitle(row)}</b>
-                  <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status', 'risk_class'])}</span>
-                  {opts.length === 0 && <em>No enumerated options returned — cannot answer from Command Center yet.</em>}
-                </button>
+                <div key={id} className={'panel-card decision-choice' + (flow.selected && id === rowId(flow.selected) ? ' selected' : '')}>
+                  <button className="panel-card-button" onClick={() => flow.setSelectedId(id)}>
+                    <b>{rowTitle(row)}</b>
+                    <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status', 'risk_class'])}</span>
+                    {opts.length === 0 && <em>No enumerated options returned — cannot answer from Command Center yet.</em>}
+                  </button>
+                  {(showRouteToClient || onRouteClient) && (
+                    <button className="ghost-btn panel-source" onClick={(ev) => { ev.stopPropagation(); onRouteClient?.(row); }}>Route to recipients</button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -175,7 +180,7 @@ export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showR
                 <b>{rowTitle(row)}</b>
                 <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status'])}</span>
                 <div className="panel-note">Client decision — route it to the app’s decision recipients for confirmation.</div>
-                {(showRouteToClient || onRouteClient) && <button className="ghost-btn panel-source" onClick={() => onRouteClient?.(row)}>Route to client</button>}
+                {(showRouteToClient || onRouteClient) && <button className="ghost-btn panel-source" onClick={() => onRouteClient?.(row)}>Route to recipients</button>}
               </div>
             ))}
           </div>

@@ -122,7 +122,7 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
         <div className="route-modal-head">
           <div>
             <div className="detail-eyebrow">Reviewing AI-rewritten decision email</div>
-            <h2>Route to client</h2>
+            <h2>Route to recipients</h2>
           </div>
           <button className="slideover-close" onClick={onClose}>×</button>
         </div>
