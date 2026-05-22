@@ -20,7 +20,7 @@ Run these before greenlighting Slice 1 — the agents are blocked until each is 
 - [ ] **DKIM / SPF / DMARC** DNS records configured for that subdomain (DNS propagation can take hours; do this first).
 - [ ] **`RESEND_API_KEY`** generated, ready to `supabase secrets set` on the control plane.
 - [ ] **`RESEND_WEBHOOK_SECRET`** generated (for verifying inbound + delivery webhooks).
-- [ ] **LLM provider chosen** (recommended: Claude Sonnet 4 via Anthropic API). API key ready. Monthly cap decided (recommended: $20/month soft ceiling for v1).
+- [ ] **Claude Code CLI authenticated on Mac Studio** — `claude --version` succeeds (already true since the runner uses it). The runner daemon picks up LLM extraction tasks via the operator's existing Anthropic subscription — no API key billing, no monthly cap, no additional vendor. Slice 2 only.
 - [ ] **First friendly-client recipient identified.** Recommendation: Brian himself OR one QEP business owner who knows about the experiment. NOT all six clients on day one.
 - [ ] **30 minutes blocked** on Brian's calendar to run the Slice 1 smoke test (route a real QEP decision → click confirm → verify work order queues).
 
@@ -124,11 +124,14 @@ Brian's stated pain across the platform's six client apps: decisions chased over
    │  calls cc_resolve_issue      │                       └─────────┬─────────┘
    │  state=answered              │                                 │
    └────────────┬─────────────────┘                                 ▼
-                │                                       ┌──────────────────────┐
-                │                                       │  cc-extract-reply    │
-                │                                       │  LLM proposal ONLY   │
-                │                                       │  NEVER commits       │
-                │                                       └─────────┬────────────┘
+                │                                ┌────────────────────────────────┐
+                │                                │  Mac Studio runner daemon      │
+                │                                │  polls for state=replied rows  │
+                │                                │  runs `claude` CLI locally     │
+                │                                │  (existing subscription)       │
+                │                                │  LLM proposal ONLY             │
+                │                                │  NEVER commits                 │
+                │                                └─────────┬──────────────────────┘
                 │                                                 │
                 │                                                 ▼
                 │                                    ┌─────────────────────────┐
@@ -165,6 +168,7 @@ Brian's stated pain across the platform's six client apps: decisions chased over
 - Every commit path (magic-link click OR operator confirm) goes through the existing `cc_resolve_issue` + `cc_enqueue_with_gating` RPCs. No new commit pathway is introduced.
 - Raw magic-link tokens **never** stored at rest — only HMAC hashes.
 - `target_repo` and `target_branch` stay server-bound from the registry. Email never names a repo.
+- **LLM extraction runs on the Mac Studio runner via `claude` CLI**, not via an external API. Reply text never leaves the operator's hardware until the operator confirms. Uses the existing Anthropic subscription — zero additional billing.
 
 ---
 
@@ -222,6 +226,8 @@ CREATE TABLE public.cc_decision_email_sends (
   selected_option text,
   raw_reply_text text,                   -- quarantined; service-role only
   llm_extraction jsonb,                  -- {matched_option_id, confidence, reasoning, requires_human}
+  extraction_started_at timestamptz,     -- runner claim marker; prevents double-processing
+  extraction_runner_id text,             -- which Mac Studio runner is processing this
   operator_confirmed_by text,
   operator_confirmed_at timestamptz,
   CONSTRAINT cc_decision_email_sends_options_array
@@ -399,26 +405,73 @@ Flow:
 
 **Must not:** treat any event as an answer; downgrade a stronger state; loop on inbound parsing failures.
 
-### 6.5 `cc-extract-reply` — internal, LLM proposal only
+### 6.5 LLM extraction — runs on the Mac Studio, NOT as an edge function
 
+Architectural note: there is no `cc-extract-reply` edge function. Extraction runs on the operator's Mac Studio via the runner daemon's existing Claude Code authentication. The runner gains a new poll loop alongside its work-order poll.
+
+**The queue is the table itself.** When `cc-resend-webhook` transitions a row to `state='replied'` with `raw_reply_text` populated and `llm_extraction IS NULL`, the runner picks it up on its next poll cycle (every ~30 seconds).
+
+**Runner poll loop (added to existing daemon):**
+
+```typescript
+// Every 30s, alongside the existing work-order poll:
+const task = await claimExtractionTask(runnerId);
+if (!task) { sleep(30s); continue; }
+
+const prompt = buildExtractionPrompt({
+  decisionTitle: task.decision_title,
+  options: task.options_snapshot,
+  replyText: task.raw_reply_text,
+});
+
+// Spawn claude CLI subprocess with stdin prompt (NOT argv — secrets safety).
+const result = await runClaudeCli(prompt);
+
+// Parse strict JSON output; validate matched_option_id exists in options_snapshot.
+const extraction = parseAndValidate(result, task.options_snapshot);
+
+// Write back via control-plane service-role.
+await writeExtraction(task.id, extraction);
+await auditEvent('decision_extraction_proposed', task);
 ```
-POST /functions/v1/cc-extract-reply
-Auth: internal shared secret (CC_INTERNAL_TOKEN)
-Body: { email_send_id }
+
+**Atomic claim RPC** (added to migration 025 alongside the table):
+
+```sql
+CREATE OR REPLACE FUNCTION public.cc_claim_extraction_task(p_runner_id text)
+RETURNS public.cc_decision_email_sends
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $fn$
+DECLARE
+  v_row public.cc_decision_email_sends;
+BEGIN
+  WITH candidate AS (
+    SELECT id FROM public.cc_decision_email_sends
+    WHERE deleted_at IS NULL
+      AND state = 'replied'
+      AND llm_extraction IS NULL
+      AND extraction_started_at IS NULL
+    ORDER BY replied_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+  )
+  UPDATE public.cc_decision_email_sends wo
+     SET extraction_started_at = now(),
+         extraction_runner_id = p_runner_id
+    FROM candidate
+   WHERE wo.id = candidate.id
+  RETURNING wo.* INTO v_row;
+  RETURN v_row;
+END;
+$fn$;
 ```
 
-Flow:
-1. Verify `x-cc-internal-token`.
-2. Load send row; assert `raw_reply_text` present.
-3. Call LLM (Claude Sonnet 4) with bounded prompt: decision title + `options_snapshot` + reply text.
-4. Parse strict JSON: `{matched_option_id, confidence, reasoning, requires_human}`.
-5. Validate `matched_option_id` is `null` OR exists in `options_snapshot`.
-6. Update `cc_decision_email_sends.llm_extraction`.
-7. Audit `decision_extraction_proposed`.
+Plus a sweeper for stuck extractions: rows with `extraction_started_at > now() - interval '10 minutes'` and `llm_extraction IS NULL` get their `extraction_started_at` cleared so they retry.
 
-**Must not:** call `cc_resolve_issue`; auto-commit; treat LLM output as authority; include raw reply text in any audit event detail or downstream `change_spec`.
+**Must not:** call `cc_resolve_issue` from the runner; auto-commit; treat `claude` output as authority; include raw reply text in any audit event detail or downstream `change_spec`; pass the reply text via process argv (use stdin only).
 
-Retry: 2× total; on third failure mark `requires_human: true`.
+Retry: 2× total; on third failure mark `llm_extraction = {requires_human: true, error: "..."}`.
+
+**Operator manual re-extract:** if the operator wants to retry an extraction (e.g. LLM got it wrong), the confirm queue UI can call a thin `cc-reextract-decision` edge function that sets `extraction_started_at = NULL` and `llm_extraction = NULL`, putting the row back in the runner's claimable pool. Defer to Slice 3 polish if not needed in v1.
 
 ### 6.6 `cc-confirm-extraction` — operator confirms parsed reply
 
@@ -756,16 +809,17 @@ supabase secrets set ANTHROPIC_API_KEY='<from console.anthropic.com>' --project-
 
 **Done when:** the smoke completes end-to-end with a real email, real click, real work-order dispatch.
 
-### Slice 2 — Inbound + LLM extraction + operator confirm queue
+### Slice 2 — Inbound + LLM extraction (Mac Studio) + operator confirm queue
 
-**Goal:** recipients can reply via plain email; LLM proposes the matched option; Brian confirms; answer commits.
+**Goal:** recipients can reply via plain email; the Mac Studio runner extracts via Claude Code; Brian confirms in the queue; answer commits.
 
-- [ ] **Edge function `cc-extract-reply`** built + deployed.
-- [ ] **Edge function `cc-confirm-extraction`** built + deployed.
-- [ ] **Extend `cc-resend-webhook`** to handle `replied`/`inbound` events → invoke `cc-extract-reply` async.
+- [ ] **Migration 025b**: add `cc_claim_extraction_task` RPC + sweeper for stuck extractions (alongside the column additions already in migration 025).
+- [ ] **Runner daemon update**: add the extraction poll loop alongside the work-order poll. Reuses the existing Claude Code authentication. New task type, same daemon process.
+- [ ] **Edge function `cc-confirm-extraction`** built + deployed (operator-confirms a parsed extraction).
+- [ ] **Extend `cc-resend-webhook`** to handle `replied`/`inbound` events → transitions row to `state='replied'`. NO inline LLM call; the runner picks it up.
 - [ ] **Frontend**: build operator confirm queue band on `/decisions` page per UX spec §9.3.
-- [ ] **LLM**: Anthropic API key + monthly cap configured.
-- [ ] **Live smoke**: reply (in plain English) to a routed decision; verify the extraction proposal lands in confirm queue; Brian confirms; answer commits.
+- [ ] **Confirm `claude --version` succeeds on the Mac Studio** — should already be true since the runner uses it.
+- [ ] **Live smoke**: reply (in plain English) to a routed decision; verify the extraction proposal lands in confirm queue within ~30 seconds; Brian confirms; answer commits.
 
 **Stop condition:** if confirm queue >10 items/day after a week, build auto-confirm rules (out of scope for Phase 5) BEFORE Slice 3.
 
@@ -786,12 +840,11 @@ supabase secrets set ANTHROPIC_API_KEY='<from console.anthropic.com>' --project-
 
 Before kicking off Slice 1, Brian decides:
 
-1. **LLM provider + model** — recommend Claude Sonnet 4. Confirm.
-2. **Monthly LLM cap** — recommend $20. Confirm.
-3. **First friendly-client recipient** — Brian himself? Rylee? One QEP business owner? Name them.
-4. **Reminder cadence** — recommend 3-day default, max 2 reminders. Accept or override.
-5. **Sending domain confirmation** — `decisions.blackrockai.co`. Accept or pick another.
-6. **Initial Slice 1 deployment target** — Netlify URL for the confirm page? Or serve directly from Supabase edge function HTML? Recommend Netlify.
+1. **LLM via Claude Code CLI on Mac Studio** — LOCKED. Extraction runs on the operator's Mac Studio via the runner daemon's existing Anthropic subscription. No API key, no monthly cap, no additional vendor. Reply text never leaves the operator's hardware until the operator confirms.
+2. **First friendly-client recipient** — Brian himself? Rylee? One QEP business owner? Name them.
+3. **Reminder cadence** — recommend 3-day default, max 2 reminders. Accept or override.
+4. **Sending domain confirmation** — `decisions.blackrockai.co`. Accept or pick another.
+5. **Initial Slice 1 deployment target** — Netlify URL for the confirm page? Or serve directly from Supabase edge function HTML? Recommend Netlify.
 
 ---
 
