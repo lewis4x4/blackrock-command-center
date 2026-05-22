@@ -42,11 +42,12 @@ Deno.serve(async (req) => {
   if (!issueId || !UUID_RE.test(issueId)) return json({ error: "issue_id must be a valid uuid" }, 400, access.headerValue);
   if (!appId || !UUID_RE.test(appId)) return json({ error: "app_id must be a valid uuid" }, 400, access.headerValue);
   if (!rawTitle) return json({ error: "raw_title is required" }, 400, access.headerValue);
-  if (!Array.isArray(options) || options.length === 0) return json({ error: "options must be a non-empty array" }, 400, access.headerValue);
+  if (!Array.isArray(options)) return json({ error: "options must be an array (use [] when the decision has no enumerated options)" }, 400, access.headerValue);
   if (!["auto", "authorize", "destructive", "production"].includes(riskClass)) return json({ error: "risk_class must be auto, authorize, destructive, or production" }, 400, access.headerValue);
 
+  // Empty options array is allowed: the AI rewrite step will suggest options
+  // (Mac Studio Claude) and the operator approves/edits before send.
   const normalizedOptions = options.map((item) => normalizeOption(item)).filter((item): item is Record<string, string> => !!item);
-  if (normalizedOptions.length === 0) return json({ error: "options must include ids" }, 400, access.headerValue);
 
   try {
     const issues = await cpGet(`cc_issues?id=eq.${issueId}&deleted_at=is.null&select=id,app_id,status,source_ref,issue_type,detail`);

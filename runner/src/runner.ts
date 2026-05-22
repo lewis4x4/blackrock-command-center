@@ -116,13 +116,24 @@ type RewriteOutput = {
 };
 
 function buildRewritePrompt(task: RewriteTask): string {
+  const inputOptions = normalizeRewriteOptions(task.options_snapshot);
+  const hasOptions = inputOptions.length > 0;
+  const optionsRule = hasOptions
+    ? [
+        "- Keep every option id exactly the same.",
+        "- Rewrite option labels into plain English.",
+      ]
+    : [
+        "- The raw decision has no enumerated options. Generate 2-4 plausible, mutually-exclusive options the recipient could pick to resolve the question.",
+        "- Each generated option must have a short snake_case id (e.g. \"approve\", \"reject\", \"approve_with_changes\") and a plain-English label.",
+        "- Do not invent facts; base options on the raw question only.",
+      ];
   return [
     "You rewrite technical client decisions into friendly customer-facing email copy.",
     "Return ONLY valid JSON with keys: rewritten_subject, rewritten_body, rewritten_options.",
     "Rules:",
     "- Keep the meaning exactly the same.",
-    "- Keep every option id exactly the same.",
-    "- Rewrite option labels into plain English.",
+    ...optionsRule,
     "- Keep the body brief, polite, and natural from Brian Lewis.",
     "- Do not add facts not present in the raw decision.",
     "",
@@ -130,7 +141,7 @@ function buildRewritePrompt(task: RewriteTask): string {
       decision_external_ref: task.decision_external_ref,
       raw_title: task.raw_decision_title,
       raw_body: task.raw_decision_body,
-      options: normalizeRewriteOptions(task.options_snapshot),
+      options: inputOptions,
     }, null, 2),
   ].join("\n");
 }
