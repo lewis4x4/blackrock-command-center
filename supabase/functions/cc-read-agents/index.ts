@@ -33,7 +33,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
 };
 
-const OPEN_WORK_ORDER_STATUSES = ["queued", "claimed", "dispatched", "building", "pr_open"] as const;
+const OPEN_WORK_ORDER_STATUSES = ["queued", "gated", "claimed", "dispatched", "building", "pr_open"] as const;
 const CLOSED_WORK_ORDER_STATUSES = ["done", "failed", "dead_lettered", "cancelled"] as const;
 
 type AccessResult = {
@@ -177,6 +177,9 @@ function normalizeWorkOrder(row: unknown): Record<string, unknown> {
   return {
     ...rest,
     cost_cap_usd: asNumber(rec.cost_cap_usd),
+    gated_reason: asString(rec.gated_reason),
+    approved_by: asString(rec.approved_by),
+    approved_at: asString(rec.approved_at),
     attempt_count: asNumber(rec.attempt_count) ?? 0,
     max_attempts: asNumber(rec.max_attempts) ?? 0,
     app: appFromJoined(rec),
@@ -240,7 +243,7 @@ function buildCostLedgerSummary(rows: unknown[]): { rows: Record<string, unknown
 
 const workOrderSelect = [
   "id", "created_at", "updated_at", "app_id", "target_repo", "target_branch", "change_spec", "source_answer_id",
-  "risk_class", "cost_cap_usd", "status", "claimed_by", "claimed_at", "lease_expires_at", "attempt_count",
+  "risk_class", "cost_cap_usd", "status", "gated_reason", "approved_by", "approved_at", "claimed_by", "claimed_at", "lease_expires_at", "attempt_count",
   "max_attempts", "last_error", "dispatched_at", "pr_opened_at", "completed_at", "dead_lettered_at", "pr_url",
   "registry_apps(short_code,display_name)",
 ].join(",");

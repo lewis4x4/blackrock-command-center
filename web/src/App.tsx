@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  INITIAL_DEMO, loadHome, loadActivity,
-  type AppRow, type ActivityEvent, type IssueRow,
+  INITIAL_DEMO, loadHome, loadActivity, loadAgents,
+  type AppRow, type ActivityEvent, type IssueRow, type AgentWorkOrder,
 } from './lib';
 import { Shell, HomeView, type ShellPage } from './Home';
 import { FilesView, type FilesViewHandle } from './Files';
@@ -37,6 +37,7 @@ export default function App() {
   const [apps, setApps] = useState<AppRow[]>([]);
   const [issues, setIssues] = useState<IssueRow[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [workOrders, setWorkOrders] = useState<AgentWorkOrder[]>([]);
   const [err, setErr] = useState('');
   const filesRef = useRef<FilesViewHandle | null>(null);
   const agentsRef = useRef<AgentsViewHandle | null>(null);
@@ -53,13 +54,15 @@ export default function App() {
   async function load() {
     setLoadState('loading');
     try {
-      const [home, ev] = await Promise.all([
+      const [home, ev, agents] = await Promise.all([
         loadHome(INITIAL_DEMO),
         loadActivity(INITIAL_DEMO),
+        loadAgents(INITIAL_DEMO),
       ]);
       setApps(home.apps);
       setIssues(home.issues);
       setActivity(ev);
+      setWorkOrders(agents.work_orders.open);
       setLoadState('ready');
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -101,7 +104,7 @@ export default function App() {
         <>
           {loadState === 'loading' && <Loading />}
           {loadState === 'error' && <ErrorState message={err} onRetry={load} />}
-          {loadState === 'ready' && <HomeView apps={apps} issues={issues} activity={activity} demo={INITIAL_DEMO} onResolved={load} />}
+          {loadState === 'ready' && <HomeView apps={apps} issues={issues} activity={activity} workOrders={workOrders} demo={INITIAL_DEMO} onResolved={load} />}
         </>
       )}
     </Shell>

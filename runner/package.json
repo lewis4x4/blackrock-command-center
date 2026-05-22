@@ -1,0 +1,17 @@
+{
+  "name": "blackrock-command-center-runner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BlackRock AI Command Center runner daemon for Claude Code /goal work orders",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "^5.5.4"
+  }
+}

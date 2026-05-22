@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import {
-  ago, sum, hoursOld, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone,
-  type AppRow, type ActivityEvent, type TriageItem, type BuildStatus, type IssueRow, type TriageSev,
+  ago, sum, hoursOld, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone, approveWorkOrder,
+  type AppRow, type ActivityEvent, type TriageItem, type BuildStatus, type IssueRow, type TriageSev, type AgentWorkOrder,
 } from './lib';
 import { CheckSyncPanel, OpenDecisionsPanel, ReviewBlockersPanel, ViewBuildPanel } from './TriagePanels';
 
@@ -130,7 +130,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
 /* ============================================================================
    HOME — portfolio strip + three bands
    ============================================================================ */
-export function HomeView({ apps, issues, activity, demo, onResolved }: { apps: AppRow[]; issues: IssueRow[]; activity: ActivityEvent[]; demo: boolean; onResolved: () => void | Promise<void> }) {
+export function HomeView({ apps, issues, activity, workOrders, demo, onResolved }: { apps: AppRow[]; issues: IssueRow[]; activity: ActivityEvent[]; workOrders: AgentWorkOrder[]; demo: boolean; onResolved: () => void | Promise<void> }) {
   const [openItem, setOpenItem] = useState<TriageItem | null>(null);
   const sorted = [...apps].sort((a, b) => b.criticality - a.criticality);
   const appById = new Map(sorted.map((app) => [app.id, app]));
@@ -139,6 +139,13 @@ export function HomeView({ apps, issues, activity, demo, onResolved }: { apps: A
     .map((issue) => issueToTriage(issue, appById.get(issue.app_id)))
     .filter((item): item is TriageItem => !!item)
     .sort((a, b) => SEV_RANK[a.sev] - SEV_RANK[b.sev] || b.app.criticality - a.app.criticality || a.issue.surfaced_at.localeCompare(b.issue.surfaced_at));
+
+  const gatedOrders = workOrders
+    .filter((order) => order.status === 'gated')
+    .sort((a, b) => (appById.get(b.app_id)?.criticality ?? 0) - (appById.get(a.app_id)?.criticality ?? 0) || a.created_at.localeCompare(b.created_at));
+  const prOrders = workOrders
+    .filter((order) => order.status === 'pr_open')
+    .sort((a, b) => (appById.get(b.app_id)?.criticality ?? 0) - (appById.get(a.app_id)?.criticality ?? 0) || (a.pr_opened_at ?? a.created_at).localeCompare(b.pr_opened_at ?? b.created_at));
 
   const active = sorted.filter((a) => a.status === 'active').length;
   const openDec = sorted.reduce((n, a) => n + (a.decision_counts?.open ?? 0), 0);
@@ -164,7 +171,9 @@ export function HomeView({ apps, issues, activity, demo, onResolved }: { apps: A
       </div>
 
       <TriageBand items={triage} onOpen={setOpenItem} />
+      <AwaitingApprovalBand orders={gatedOrders} apps={appById} demo={demo} onApproved={onResolved} />
       <ProjectsBand apps={sorted} />
+      <PrReviewBand orders={prOrders} apps={appById} />
       <ActivityBand activity={activity} />
       {openItem && (
         <TriagePanelHost
@@ -263,6 +272,62 @@ function TriageBand({ items, onOpen }: { items: TriageItem[]; onOpen: (item: Tri
           </div>
         ))
       )}
+    </section>
+  );
+}
+
+/* ───────────────────── Approval band — Phase 4 gated dispatch ───────────── */
+function AwaitingApprovalBand({ orders, apps, demo, onApproved }: { orders: AgentWorkOrder[]; apps: Map<string, AppRow>; demo: boolean; onApproved: () => void | Promise<void> }) {
+  const [approving, setApproving] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  if (orders.length === 0) return null;
+
+  async function approve(order: AgentWorkOrder) {
+    setApproving(order.id);
+    setError('');
+    try {
+      await approveWorkOrder(order.id, demo);
+      await onApproved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApproving(null);
+    }
+  }
+
+  return (
+    <section className="band approval-band">
+      <div className="band-head">
+        <span className="band-num approval">!</span>
+        <div>
+          <div className="band-title">Awaiting your approval</div>
+          <div className="band-sub">Risky work orders are created, but the daemon cannot claim them until you press approve.</div>
+        </div>
+        <span className="count-chip">{orders.length}</span>
+      </div>
+      {error && <div className="approval-error">Approval failed: {error}</div>}
+      <div className="approval-grid">
+        {orders.map((order) => {
+          const app = apps.get(order.app_id);
+          const code = app?.short_code ?? order.app.short_code ?? 'APP';
+          return (
+            <div className="approval-card" key={order.id}>
+              <div className="approval-top">
+                <div className="badge" style={{ background: colorFor(code) }}>{code[0]}</div>
+                <div>
+                  <b>{app?.display_name ?? order.app.display_name ?? code}</b>
+                  <span>{ago(order.created_at) ?? 'just now'} · {order.risk_class}</span>
+                </div>
+              </div>
+              <div className="approval-intent">{workOrderIntent(order)}</div>
+              <div className="approval-reason">Gate: {label(order.gated_reason ?? 'authorize_class')}</div>
+              <button className="btn-primary approval-btn" onClick={() => void approve(order)} disabled={approving !== null}>
+                {approving === order.id ? 'Approving…' : 'Approve'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -387,6 +452,57 @@ function AppCard({ app }: { app: AppRow }) {
       </div>
     </div>
   );
+}
+
+/* ───────────────────── PR review band — Phase 4 firehose mitigation ─────── */
+function PrReviewBand({ orders, apps }: { orders: AgentWorkOrder[]; apps: Map<string, AppRow> }) {
+  if (orders.length === 0) return null;
+  return (
+    <section className="band pr-band">
+      <div className="band-head">
+        <span className="band-num pr">PR</span>
+        <div>
+          <div className="band-title">PRs ready for review</div>
+          <div className="band-sub">Review queue ranked by app criticality, oldest PR first.</div>
+        </div>
+        <span className="count-chip">{orders.length}</span>
+      </div>
+      <div className="pr-list">
+        {orders.map((order) => {
+          const app = apps.get(order.app_id);
+          const code = app?.short_code ?? order.app.short_code ?? 'APP';
+          return (
+            <div className="pr-row" key={order.id}>
+              <div className="agents-app">
+                <span className="badge" style={{ background: colorFor(code) }}>{code[0]}</span>
+                <div>
+                  <b>{app?.display_name ?? order.app.display_name ?? code}</b>
+                  <span>{code}</span>
+                </div>
+              </div>
+              <div className="pr-text">
+                <div className="pr-title">{workOrderIntent(order)}</div>
+                <div className="pr-sub">Opened {ago(order.pr_opened_at ?? order.created_at) ?? 'recently'}</div>
+              </div>
+              {order.pr_url ? <a className="act-btn pr-link" href={order.pr_url} target="_blank" rel="noreferrer">Open PR</a> : <span className="pr-missing">No PR URL</span>}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function workOrderIntent(order: AgentWorkOrder): string {
+  return textValue(order.change_spec.intent) ?? textValue(order.change_spec.title) ?? 'Untitled work order';
+}
+
+function textValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function label(value: string): string {
+  return value.replace(/_/g, ' ');
 }
 
 /* ───────────────────── Band 3 — activity feed ───────────────────────────── */

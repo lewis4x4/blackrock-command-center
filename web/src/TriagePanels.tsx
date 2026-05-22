@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { SlideOver } from './SlideOver';
 import {
-  answerIssue, ago, loadAppDetailSection,
+  answerIssue, ago, dispatchFromAnswer, loadAppDetailSection,
   type AppRow, type DetailSectionPayload, type IssueAction, type IssueRow, type RiskClass,
 } from './lib';
 
@@ -26,6 +26,8 @@ export function OpenDecisionsPanel(props: PanelProps) {
   const [rationale, setRationale] = useState('');
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [dispatchNotice, setDispatchNotice] = useState<{ tone: 'queued' | 'gated'; text: string } | null>(null);
+  const [completed, setCompleted] = useState(false);
 
   const operatorRows = useMemo(() => rows.filter(isOperatorDecision), [rows]);
   const clientRows = useMemo(() => rows.filter((row) => !isOperatorDecision(row)), [rows]);
@@ -48,15 +50,22 @@ export function OpenDecisionsPanel(props: PanelProps) {
     if (!selected || !selectedAnswer) return;
     setBusy(true);
     setActionError('');
+    setDispatchNotice(null);
     try {
-      await answerIssue(issue.id, 'answer_decision', {
+      const answerResult = await answerIssue(issue.id, 'answer_decision', {
         answer_value: selectedAnswer,
         answer_options_snapshot: options,
         rationale,
         risk_class: riskClass,
         decision_external_ref: rowId(selected),
       }, demo);
-      onResolved();
+      const answerId = decisionAnswerIdFromResult(answerResult);
+      if (!answerId) throw new Error('Decision was recorded, but the response did not include decision_answer_id for dispatch.');
+      const dispatch = await dispatchFromAnswer(answerId, demo);
+      setDispatchNotice(dispatch.dispatched
+        ? { tone: 'queued', text: 'Work order queued — daemon will build.' }
+        : { tone: 'gated', text: 'Work order created — needs your approval on the home.' });
+      setCompleted(true);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -64,17 +73,25 @@ export function OpenDecisionsPanel(props: PanelProps) {
     }
   }
 
+  function closeAfterMaybeRefresh() {
+    if (completed) onResolved();
+    else onClose();
+  }
+
   return (
-    <SlideOver open title="Open decisions" subtitle={`${app.short_code} · answer operator-owned decisions only`} onClose={onClose} footer={(
+    <SlideOver open title="Open decisions" subtitle={`${app.short_code} · answer operator-owned decisions only`} onClose={closeAfterMaybeRefresh} footer={(
       <>
-        <button className="ghost-btn" onClick={onClose}>Close</button>
-        <button className="btn-primary panel-primary" onClick={() => void submitAnswer()} disabled={busy || !selected || !selectedAnswer || options.length === 0}>
-          {busy ? 'Recording…' : 'Answer decision'}
-        </button>
+        <button className="ghost-btn" onClick={closeAfterMaybeRefresh}>{completed ? 'Done' : 'Close'}</button>
+        {!completed && (
+          <button className="btn-primary panel-primary" onClick={() => void submitAnswer()} disabled={busy || !selected || !selectedAnswer || options.length === 0}>
+            {busy ? 'Recording…' : 'Answer decision'}
+          </button>
+        )}
       </>
     )}>
       <PanelStatus state={state} error={error} empty={rows.length === 0} emptyCopy="No decisions returned for this app yet." />
       {actionError && <div className="panel-error">{actionError}</div>}
+      {dispatchNotice && <div className={'panel-confirm ' + dispatchNotice.tone}>{dispatchNotice.tone === 'queued' ? '✓' : '!'} {dispatchNotice.text}</div>}
       {operatorRows.length > 0 && (
         <div className="panel-section">
           <div className="panel-label">Operator-owned</div>
@@ -105,7 +122,7 @@ export function OpenDecisionsPanel(props: PanelProps) {
             <span>Rationale (optional, one line)</span>
             <input value={rationale} onChange={(ev) => setRationale(ev.target.value)} maxLength={500} placeholder="Why this option?" />
           </label>
-          <div className="panel-note">Risk class: <b>{riskClass}</b>. Answering records the decision; dispatch stays Phase 4.</div>
+          <div className="panel-note">Risk class: <b>{riskClass}</b>. Answering records the decision and creates a work order immediately.</div>
         </div>
       )}
       {clientRows.length > 0 && (
@@ -381,6 +398,14 @@ function text(value: unknown): string | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function decisionAnswerIdFromResult(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const direct = text(value.decision_answer_id);
+  if (direct) return direct;
+  const issue = isRecord(value.issue) ? value.issue : null;
+  return issue ? text(issue.decision_answer_id) : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

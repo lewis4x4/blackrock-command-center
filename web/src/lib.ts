@@ -114,7 +114,7 @@ export interface AppDetailPayload {
   key_class?: 'readonly' | 'service_role' | null;
 }
 
-export type WorkOrderStatus = 'queued' | 'claimed' | 'dispatched' | 'building' | 'pr_open' | 'done' | 'failed' | 'dead_lettered' | 'cancelled';
+export type WorkOrderStatus = 'queued' | 'gated' | 'claimed' | 'dispatched' | 'building' | 'pr_open' | 'done' | 'failed' | 'dead_lettered' | 'cancelled';
 export type AgentRunStatus = 'running' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
 export interface AgentAppIdentity { id: string | null; short_code: string | null; display_name: string | null; }
 export interface AgentWorkOrder {
@@ -129,6 +129,9 @@ export interface AgentWorkOrder {
   risk_class: RiskClass;
   cost_cap_usd: number | null;
   status: WorkOrderStatus;
+  gated_reason?: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
   claimed_by: string | null;
   claimed_at: string | null;
   lease_expires_at: string | null;
@@ -181,6 +184,17 @@ export interface RunnerStatus {
   last_seen_at: string | null;
   note: string;
 }
+export type WorkOrder = AgentWorkOrder;
+
+export interface DispatchFromAnswerResponse {
+  work_order: WorkOrder;
+  dispatched: boolean;
+}
+
+export interface ApproveWorkOrderResponse {
+  work_order: WorkOrder;
+}
+
 export interface AgentsPayload {
   work_orders: {
     open: AgentWorkOrder[];
@@ -205,6 +219,7 @@ export const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   'decision_routed',
   'decision_reply_received',
   'work_order_created',
+  'work_order_gated',
   'pr_opened',
   'work_order_failed',
   'work_order_dead_lettered',
@@ -365,6 +380,34 @@ export const DEMO_AGENTS: AgentsPayload = {
         risk_class: 'authorize', cost_cap_usd: 12, status: 'claimed', claimed_by: 'mac-studio-01', claimed_at: isoAgo(18), lease_expires_at: isoAgo(-7),
         attempt_count: 1, max_attempts: 3, last_error: null, pr_url: null,
       },
+      {
+        id: 'demo-wo-qep-gated-1', app_id: 'qep', app: { id: 'qep', short_code: 'QEP', display_name: 'QEP OS' },
+        created_at: isoAgo(24), updated_at: isoAgo(24), target_repo: 'lewis4x4/qep', target_branch: 'main',
+        change_spec: { intent: 'Apply the answer “route to manager” to quote approval thresholds', affected_area: 'quotes', acceptance_criteria: ['manager route is implemented', 'existing tests pass'] },
+        risk_class: 'authorize', cost_cap_usd: 5, status: 'gated', gated_reason: 'authorize_class', approved_by: null, approved_at: null,
+        claimed_by: null, claimed_at: null, lease_expires_at: null, attempt_count: 0, max_attempts: 3, last_error: null, pr_url: null,
+      },
+      {
+        id: 'demo-wo-scc-gated-1', app_id: 'scc', app: { id: 'scc', short_code: 'SCC', display_name: 'SCC' },
+        created_at: isoAgo(66), updated_at: isoAgo(66), target_repo: 'lewis4x4/scc', target_branch: 'main',
+        change_spec: { intent: 'Prepare production sync retry backfill', affected_area: 'sync', acceptance_criteria: ['backfill plan is safe', 'no destructive migration'] },
+        risk_class: 'production', cost_cap_usd: 8, status: 'gated', gated_reason: 'production_class', approved_by: null, approved_at: null,
+        claimed_by: null, claimed_at: null, lease_expires_at: null, attempt_count: 0, max_attempts: 3, last_error: null, pr_url: null,
+      },
+      {
+        id: 'demo-wo-qep-pr-1', app_id: 'qep', app: { id: 'qep', short_code: 'QEP', display_name: 'QEP OS' },
+        created_at: isoAgo(210), updated_at: isoAgo(30), target_repo: 'lewis4x4/qep', target_branch: 'main',
+        change_spec: { intent: 'Tighten OEM portal fallback copy', affected_area: 'portal fallback', acceptance_criteria: ['copy is plain-language', 'tests pass'] },
+        risk_class: 'auto', cost_cap_usd: 4, status: 'pr_open', claimed_by: 'mac-studio-01', claimed_at: isoAgo(190), lease_expires_at: null,
+        attempt_count: 1, max_attempts: 3, last_error: null, pr_opened_at: isoAgo(30), pr_url: 'https://github.com/lewis4x4/qep/pull/131',
+      },
+      {
+        id: 'demo-wo-scc-pr-1', app_id: 'scc', app: { id: 'scc', short_code: 'SCC', display_name: 'SCC' },
+        created_at: isoAgo(260), updated_at: isoAgo(75), target_repo: 'lewis4x4/scc', target_branch: 'main',
+        change_spec: { intent: 'Fix project-grid health copy for SCC', affected_area: 'home', acceptance_criteria: ['copy reads naturally', 'build passes'] },
+        risk_class: 'auto', cost_cap_usd: 3, status: 'pr_open', claimed_by: 'cursor-bg', claimed_at: isoAgo(240), lease_expires_at: null,
+        attempt_count: 1, max_attempts: 3, last_error: null, pr_opened_at: isoAgo(75), pr_url: 'https://github.com/lewis4x4/scc/pull/44',
+      },
     ],
     recent_completed: [
       {
@@ -413,6 +456,7 @@ export const DEMO_ACTIVITY: ActivityEvent[] = [
   { occurred_at: isoAgo(32),  short_code: 'SCC', actor: 'client:rylee@example.com', event_type: 'decision_reply_received', detail: { owner_name: 'Rylee' } },
   { occurred_at: isoAgo(36),  short_code: 'QEP', actor: 'system', event_type: 'work_order_created', detail: { risk_class: 'auto' } },
   { occurred_at: isoAgo(40),  short_code: 'QEP', actor: 'system', event_type: 'work_order_created', detail: { risk_class: 'authorize' } },
+  { occurred_at: isoAgo(42),  short_code: 'QEP', actor: 'system', event_type: 'work_order_gated', detail: { risk_class: 'authorize', gated_reason: 'authorize_class' } },
   { occurred_at: isoAgo(44),  short_code: 'QEP', actor: 'runner', event_type: 'agent_dispatched', detail: { runner: 'goal' } },
   { occurred_at: isoAgo(48),  short_code: 'QEP', actor: 'runner', event_type: 'agent_finished', detail: { outcome: 'succeeded' } },
   { occurred_at: isoAgo(52),  short_code: 'QEP', actor: 'runner', event_type: 'agent_failed', detail: { error: 'typecheck failed' } },
@@ -432,7 +476,7 @@ const APP_STATUSES = new Set<AppStatus>(['provisioning', 'active', 'paused', 'ar
 const LIFECYCLE_PHASES = new Set<LifecyclePhase>(['discovery', 'build', 'launched', 'maintenance']);
 const BUILD_STATUSES = new Set<BuildStatus>(['green', 'yellow', 'red', 'unknown']);
 const RISK_CLASSES = new Set<RiskClass>(['auto', 'authorize', 'destructive', 'production']);
-const WORK_ORDER_STATUSES = new Set<WorkOrderStatus>(['queued', 'claimed', 'dispatched', 'building', 'pr_open', 'done', 'failed', 'dead_lettered', 'cancelled']);
+const WORK_ORDER_STATUSES = new Set<WorkOrderStatus>(['queued', 'gated', 'claimed', 'dispatched', 'building', 'pr_open', 'done', 'failed', 'dead_lettered', 'cancelled']);
 const AGENT_RUN_STATUSES = new Set<AgentRunStatus>(['running', 'succeeded', 'failed', 'timed_out', 'cancelled']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -655,6 +699,9 @@ function parseAgentWorkOrder(value: unknown): AgentWorkOrder {
     risk_class: parseRiskClass(value.risk_class),
     cost_cap_usd: asNumber(value.cost_cap_usd),
     status: parseWorkOrderStatus(value.status),
+    gated_reason: asString(value.gated_reason),
+    approved_by: asString(value.approved_by),
+    approved_at: asString(value.approved_at),
     claimed_by: asString(value.claimed_by),
     claimed_at: asString(value.claimed_at),
     lease_expires_at: asString(value.lease_expires_at),
@@ -740,6 +787,20 @@ function parseAgentsResponse(value: unknown): AgentsPayload {
     },
     generated_at: asString(value.generated_at) ?? undefined,
   };
+}
+
+function parseDispatchFromAnswerResponse(value: unknown): DispatchFromAnswerResponse {
+  if (!isRecord(value) || !isRecord(value.work_order) || typeof value.dispatched !== 'boolean') {
+    throw new Error('cc-dispatch-from-answer payload is invalid');
+  }
+  return { work_order: parseAgentWorkOrder(value.work_order), dispatched: value.dispatched };
+}
+
+function parseApproveWorkOrderResponse(value: unknown): ApproveWorkOrderResponse {
+  if (!isRecord(value) || !isRecord(value.work_order)) {
+    throw new Error('cc-approve-work-order payload is invalid');
+  }
+  return { work_order: parseAgentWorkOrder(value.work_order) };
 }
 
 /* SOURCE 1 — cc-read-home (merged app strip/cards + issue ledger payload). */
@@ -851,8 +912,74 @@ export async function loadAppDetailSection(appId: string, demo: boolean, section
 }
 
 export async function answerIssue(issueId: string, action: IssueAction, payload: AnswerIssuePayload = {}, demo = false): Promise<unknown> {
-  if (demo) return { issue: { id: issueId, status: action === 'dismiss' ? 'dismissed' : action === 'answer_decision' ? 'answered' : 'triaging' }, action };
+  if (demo) {
+    const risk = payload.risk_class ?? 'auto';
+    return {
+      issue: {
+        id: issueId,
+        status: action === 'dismiss' ? 'dismissed' : action === 'answer_decision' ? 'answered' : 'triaging',
+        decision_answer_id: action === 'answer_decision' ? `demo-answer-${risk}-${issueId}` : null,
+      },
+      action,
+    };
+  }
   return postJson('cc-answer-issue', { issue_id: issueId, action, ...payload });
+}
+
+export async function dispatchFromAnswer(decisionAnswerId: string, demo = false): Promise<DispatchFromAnswerResponse> {
+  if (demo) {
+    const status: WorkOrderStatus = decisionAnswerId.includes('authorize') || decisionAnswerId.includes('destructive') || decisionAnswerId.includes('production') ? 'gated' : 'queued';
+    return {
+      dispatched: status === 'queued',
+      work_order: {
+        id: `demo-wo-${decisionAnswerId}`,
+        created_at: new Date().toISOString(),
+        app_id: 'qep',
+        app: { id: 'qep', short_code: 'QEP', display_name: 'QEP OS' },
+        change_spec: { intent: 'Apply the answered decision' },
+        risk_class: decisionAnswerId.includes('production') ? 'production' : decisionAnswerId.includes('destructive') ? 'destructive' : decisionAnswerId.includes('authorize') ? 'authorize' : 'auto',
+        cost_cap_usd: null,
+        status,
+        gated_reason: status === 'gated' ? 'authorize_class' : null,
+        claimed_by: null,
+        claimed_at: null,
+        lease_expires_at: null,
+        attempt_count: 0,
+        max_attempts: 3,
+        last_error: null,
+        pr_url: null,
+      },
+    };
+  }
+  return parseDispatchFromAnswerResponse(await postJson('cc-dispatch-from-answer', { decision_answer_id: decisionAnswerId }));
+}
+
+export async function approveWorkOrder(workOrderId: string, demo = false): Promise<ApproveWorkOrderResponse> {
+  if (demo) {
+    return parseApproveWorkOrderResponse({
+      work_order: {
+        id: workOrderId,
+        created_at: new Date().toISOString(),
+        app_id: 'qep',
+        app: { id: 'qep', short_code: 'QEP', display_name: 'QEP OS' },
+        change_spec: { intent: 'Approved demo work order' },
+        risk_class: 'authorize',
+        cost_cap_usd: null,
+        status: 'queued',
+        gated_reason: null,
+        approved_by: 'demo-operator',
+        approved_at: new Date().toISOString(),
+        claimed_by: null,
+        claimed_at: null,
+        lease_expires_at: null,
+        attempt_count: 0,
+        max_attempts: 3,
+        last_error: null,
+        pr_url: null,
+      },
+    });
+  }
+  return parseApproveWorkOrderResponse(await postJson('cc-approve-work-order', { work_order_id: workOrderId }));
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */
@@ -882,7 +1009,7 @@ function firstNameFromActor(actor: string): string {
 }
 
 function isAuthorizeWorkOrder(d: Record<string, unknown>): boolean {
-  return d.risk_class === 'authorize' || d.requires_authorization === true || d.status === 'pending_authorization';
+  return d.risk_class === 'authorize' || d.risk_class === 'destructive' || d.risk_class === 'production' || d.requires_authorization === true || d.status === 'pending_authorization' || d.status === 'gated';
 }
 
 /* cc_audit_events row -> §5.9 Lately [sentence, show]. show=false stays in Settings audit only.
@@ -932,6 +1059,8 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
       return isAuthorizeWorkOrder(d)
         ? [`A build task for ${app} is ready — it needs your go-ahead.`, true]
         : [`A build task was lined up for ${app} — it'll start on its own.`, true];
+    case 'work_order_gated':
+      return [`A work order needs your approval on ${app}.`, true];
     case 'pr_opened':
       return [`${app} has a PR ready for review.`, true];
     case 'work_order_failed':
@@ -975,6 +1104,7 @@ export function latelyTone(ev: ActivityEvent): LatelyTone {
     ev.event_type === 'cost_ceiling_hit' ||
     ev.event_type === 'runner_offline' ||
     ev.event_type === 'handoff_created' ||
+    ev.event_type === 'work_order_gated' ||
     (ev.event_type === 'work_order_created' && isAuthorizeWorkOrder(d))
   ) return 'needs';
   if (

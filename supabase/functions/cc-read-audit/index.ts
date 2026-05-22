@@ -42,6 +42,7 @@ const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   "decision_routed",
   "decision_reply_received",
   "work_order_created",
+  "work_order_gated",
   "pr_opened",
   "work_order_failed",
   "work_order_dead_lettered",
@@ -117,7 +118,10 @@ function latelyMapping(eventType: string | null, registry: Record<string, unknow
   switch (eventType) {
     case "work_order_created":
       return { visible: true, sentence: `You sent a build task to ${app}.`, tone: "plain" };
+    case "work_order_gated":
+      return { visible: true, sentence: `A work order needs your approval on ${app}.`, tone: "needs" };
     case "work_order_claimed":
+    case "work_order_approved":
       return { visible: false, sentence: null, tone: "plain" };
     case "pr_opened":
       return { visible: true, sentence: `${app} has a PR ready for review.`, tone: "plain" };

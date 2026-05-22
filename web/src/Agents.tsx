@@ -119,7 +119,7 @@ function RunnerStatusPill({ status }: { status: RunnerStatus }) {
 
 function QueueBand({ orders, loading }: { orders: AgentWorkOrder[]; loading: boolean }) {
   return (
-    <AgentsSection title="Queue" subtitle="Open work orders: queued, claimed, dispatched, building, or PR open." count={orders.length}>
+    <AgentsSection title="Queue" subtitle="Open work orders: queued, gated, claimed, dispatched, building, or PR open." count={orders.length}>
       {loading ? <SkeletonRows /> : orders.length === 0 ? (
         <EmptyState title="Queue is empty" copy="No open work orders are waiting on the runner right now." />
       ) : (
