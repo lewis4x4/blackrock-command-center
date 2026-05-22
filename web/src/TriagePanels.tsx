@@ -14,13 +14,15 @@ type PanelProps = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
-type Option = { id: string; label: string };
+export type DecisionOption = { id: string; label: string };
 
 const riskClasses: RiskClass[] = ['auto', 'authorize', 'destructive', 'production'];
 
-export function OpenDecisionsPanel(props: PanelProps) {
-  const { issue, app, onClose, onResolved, demo = false } = props;
-  const { state, rows, error } = usePanelSection(app.id, demo, 'decisions');
+export function useDecisionAnswerFlow({ rows, demo, issueIdForRow }: {
+  rows: Record<string, unknown>[];
+  demo: boolean;
+  issueIdForRow: (row: Record<string, unknown>) => string | null;
+}) {
   const [selectedId, setSelectedId] = useState('');
   const [selectedAnswer, setSelectedAnswer] = useState('');
   const [rationale, setRationale] = useState('');
@@ -34,11 +36,16 @@ export function OpenDecisionsPanel(props: PanelProps) {
   const selected = operatorRows.find((row) => rowId(row) === selectedId) ?? operatorRows[0] ?? null;
   const options = selected ? optionsFor(selected) : [];
   const riskClass = riskFor(selected);
+  const selectedIssueId = selected ? issueIdForRow(selected) : null;
+  const canSubmit = !!selected && !!selectedIssueId && !!selectedAnswer && options.length > 0 && !busy && !completed;
 
   useEffect(() => {
     const next = operatorRows[0];
     setSelectedId(next ? rowId(next) : '');
     setSelectedAnswer('');
+    setCompleted(false);
+    setDispatchNotice(null);
+    setActionError('');
   }, [operatorRows]);
 
   useEffect(() => {
@@ -47,12 +54,12 @@ export function OpenDecisionsPanel(props: PanelProps) {
   }, [selectedId]);
 
   async function submitAnswer() {
-    if (!selected || !selectedAnswer) return;
+    if (!selected || !selectedAnswer || !selectedIssueId) return;
     setBusy(true);
     setActionError('');
     setDispatchNotice(null);
     try {
-      const answerResult = await answerIssue(issue.id, 'answer_decision', {
+      const answerResult = await answerIssue(selectedIssueId, 'answer_decision', {
         answer_value: selectedAnswer,
         answer_options_snapshot: options,
         rationale,
@@ -73,36 +80,65 @@ export function OpenDecisionsPanel(props: PanelProps) {
     }
   }
 
+  return {
+    operatorRows, clientRows, selected, selectedId, setSelectedId,
+    selectedAnswer, setSelectedAnswer, rationale, setRationale,
+    busy, actionError, dispatchNotice, completed, options, riskClass,
+    selectedIssueId, canSubmit, submitAnswer,
+  };
+}
+
+export function OpenDecisionsPanel(props: PanelProps) {
+  const { issue, app, onClose, onResolved, demo = false } = props;
+  const { state, rows, error } = usePanelSection(app.id, demo, 'decisions');
+  const flow = useDecisionAnswerFlow({ rows, demo, issueIdForRow: () => issue.id });
+
   function closeAfterMaybeRefresh() {
-    if (completed) onResolved();
+    if (flow.completed) onResolved();
     else onClose();
   }
 
   return (
     <SlideOver open title="Open decisions" subtitle={`${app.short_code} · answer operator-owned decisions only`} onClose={closeAfterMaybeRefresh} footer={(
       <>
-        <button className="ghost-btn" onClick={closeAfterMaybeRefresh}>{completed ? 'Done' : 'Close'}</button>
-        {!completed && (
-          <button className="btn-primary panel-primary" onClick={() => void submitAnswer()} disabled={busy || !selected || !selectedAnswer || options.length === 0}>
-            {busy ? 'Recording…' : 'Answer decision'}
+        <button className="ghost-btn" onClick={closeAfterMaybeRefresh}>{flow.completed ? 'Done' : 'Close'}</button>
+        {!flow.completed && (
+          <button className="btn-primary panel-primary" onClick={() => void flow.submitAnswer()} disabled={!flow.canSubmit}>
+            {flow.busy ? 'Recording…' : 'Answer decision'}
           </button>
         )}
       </>
     )}>
-      <PanelStatus state={state} error={error} empty={rows.length === 0} emptyCopy="No decisions returned for this app yet." />
-      {actionError && <div className="panel-error">{actionError}</div>}
-      {dispatchNotice && <div className={'panel-confirm ' + dispatchNotice.tone}>{dispatchNotice.tone === 'queued' ? '✓' : '!'} {dispatchNotice.text}</div>}
-      {operatorRows.length > 0 && (
+      <DecisionAnswerBody flow={flow} state={state} error={error} empty={rows.length === 0} emptyCopy="No decisions returned for this app yet." />
+    </SlideOver>
+  );
+}
+
+export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showRouteToClient = false, missingIssueCopy = 'This decision row is missing a control-plane issue id, so it cannot be answered from Command Center yet.' }: {
+  flow: ReturnType<typeof useDecisionAnswerFlow>;
+  state: LoadState;
+  error: string;
+  empty: boolean;
+  emptyCopy: string;
+  showRouteToClient?: boolean;
+  missingIssueCopy?: string;
+}) {
+  return (
+    <>
+      <PanelStatus state={state} error={error} empty={empty} emptyCopy={emptyCopy} />
+      {flow.actionError && <div className="panel-error">{flow.actionError}</div>}
+      {flow.dispatchNotice && <div className={'panel-confirm ' + flow.dispatchNotice.tone}>{flow.dispatchNotice.tone === 'queued' ? '✓' : '!'} {flow.dispatchNotice.text}</div>}
+      {flow.operatorRows.length > 0 && (
         <div className="panel-section">
           <div className="panel-label">Operator-owned</div>
           <div className="panel-stack">
-            {operatorRows.map((row) => {
+            {flow.operatorRows.map((row) => {
               const id = rowId(row);
               const opts = optionsFor(row);
               return (
-                <button key={id} className={'panel-card decision-choice' + (id === rowId(selected) ? ' selected' : '')} onClick={() => setSelectedId(id)}>
+                <button key={id} className={'panel-card decision-choice' + (flow.selected && id === rowId(flow.selected) ? ' selected' : '')} onClick={() => flow.setSelectedId(id)}>
                   <b>{rowTitle(row)}</b>
-                  <span>{rowMeta(row, ['owner', 'age', 'status', 'risk_class'])}</span>
+                  <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status', 'risk_class'])}</span>
                   {opts.length === 0 && <em>No enumerated options returned — cannot answer from Command Center yet.</em>}
                 </button>
               );
@@ -110,36 +146,38 @@ export function OpenDecisionsPanel(props: PanelProps) {
           </div>
         </div>
       )}
-      {selected && options.length > 0 && (
+      {flow.selected && flow.options.length > 0 && (
         <div className="panel-section answer-box">
           <label>
             <span>Enumerated answer</span>
-            <select value={selectedAnswer} onChange={(ev) => setSelectedAnswer(ev.target.value)}>
-              {options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            <select value={flow.selectedAnswer} onChange={(ev) => flow.setSelectedAnswer(ev.target.value)}>
+              {flow.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
             </select>
           </label>
           <label>
             <span>Rationale (optional, one line)</span>
-            <input value={rationale} onChange={(ev) => setRationale(ev.target.value)} maxLength={500} placeholder="Why this option?" />
+            <input value={flow.rationale} onChange={(ev) => flow.setRationale(ev.target.value)} maxLength={500} placeholder="Why this option?" />
           </label>
-          <div className="panel-note">Risk class: <b>{riskClass}</b>. Answering records the decision and creates a work order immediately.</div>
+          <div className="panel-note">Risk class: <b>{flow.riskClass}</b>. Answering records the decision and creates a work order immediately.</div>
+          {!flow.selectedIssueId && <div className="panel-note">{missingIssueCopy}</div>}
         </div>
       )}
-      {clientRows.length > 0 && (
+      {flow.clientRows.length > 0 && (
         <div className="panel-section">
           <div className="panel-label">Client-owned</div>
           <div className="panel-stack">
-            {clientRows.map((row) => (
+            {flow.clientRows.map((row) => (
               <div className="panel-card" key={rowId(row)}>
                 <b>{rowTitle(row)}</b>
-                <span>{rowMeta(row, ['owner', 'age', 'status'])}</span>
+                <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status'])}</span>
                 <div className="panel-note">Client decision — routing arrives in Phase 5. No email is sent in this MVP.</div>
+                {showRouteToClient && <button className="ghost-btn panel-source" onClick={() => alert('Routing decisions to clients arrives in Phase 5.')}>Route to client</button>}
               </div>
             ))}
           </div>
         </div>
       )}
-    </SlideOver>
+    </>
   );
 }
 
@@ -344,7 +382,7 @@ function isSyncErrorRow(row: Record<string, unknown>): boolean {
   return status.includes('error') || status.includes('failed') || count > 0 || hasAny(row, ['error', 'last_error']);
 }
 
-function optionsFor(row: Record<string, unknown>): Option[] {
+function optionsFor(row: Record<string, unknown>): DecisionOption[] {
   const raw = row.options ?? row.answer_options ?? row.choices ?? row.allowed_answers;
   if (!Array.isArray(raw)) return [];
   return raw.map((item) => {
@@ -353,7 +391,7 @@ function optionsFor(row: Record<string, unknown>): Option[] {
     const id = text(item.id) ?? text(item.value) ?? text(item.key);
     const label = text(item.label) ?? text(item.name) ?? text(item.title) ?? id;
     return id && label ? { id, label } : null;
-  }).filter((item): item is Option => !!item);
+  }).filter((item): item is DecisionOption => !!item);
 }
 
 function riskFor(row: Record<string, unknown> | null): RiskClass {

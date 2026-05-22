@@ -130,6 +130,7 @@ function latelyMapping(eventType: string | null, registry: Record<string, unknow
       return { visible: true, sentence: `${app} build failed — needs a look.`, tone: "failure" };
     case "work_order_lease_expired":
     case "agents_page_read":
+    case "decisions_page_read":
       return { visible: false, sentence: null, tone: "plain" };
     default:
       return { visible: LATELY_VISIBLE_EVENT_TYPES.includes(eventType ?? ""), sentence: null, tone: "plain" };

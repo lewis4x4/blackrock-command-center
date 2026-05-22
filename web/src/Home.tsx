@@ -5,7 +5,7 @@ import {
 } from './lib';
 import { CheckSyncPanel, OpenDecisionsPanel, ReviewBlockersPanel, ViewBuildPanel } from './TriagePanels';
 
-/* WIRE-UP: remaining nav sections beyond Home/Files/Agents are stubs. */
+/* WIRE-UP: remaining nav sections beyond Home/Decisions/Files/Agents are stubs. */
 function stub(name: string) {
   alert(`${name} — section not built yet (current phase: home + shell).`);
 }
@@ -31,7 +31,7 @@ const chevron = (
 /* ============================================================================
    SHELL — left rail + topbar, wraps every view
    ============================================================================ */
-export type ShellPage = 'home' | 'agents' | 'files' | `app:${string}`;
+export type ShellPage = 'home' | 'decisions' | 'agents' | 'files' | `app:${string}`;
 
 export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children }: {
   demo: boolean;
@@ -78,7 +78,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
         </div>
         <nav>
           {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Settings'] as const).map((name) => {
-            const page = name === 'Home' ? 'home' : name === 'Agents' ? 'agents' : name === 'Files' ? 'files' : null;
+            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Files' ? 'files' : null;
             const active = page === activePage;
             return (
               <button
@@ -104,7 +104,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
       <div className="main">
         <div className="topbar">
           <div className="topbar-inner">
-          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
+          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'decisions' ? 'Decisions' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
               <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />
@@ -250,7 +250,7 @@ function TriageBand({ items, onOpen }: { items: TriageItem[]; onOpen: (item: Tri
         </div>
         <span className="count-chip">{items.length}</span>
         <div className="band-action">
-          <button className="ghost-btn" onClick={() => stub('Decisions')}>View all decisions {chevron}</button>
+          <button className="ghost-btn" onClick={() => { window.location.hash = '#/decisions'; }}>View all decisions {chevron}</button>
         </div>
       </div>
       {items.length === 0 ? (

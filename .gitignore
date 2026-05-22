@@ -3,6 +3,13 @@
 .vscode/
 .idea/
 
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.pem
+gh-app.pem
+
 # Tool state (orchestration scratch, not source)
 .omx/
 *.skill

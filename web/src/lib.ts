@@ -1124,3 +1124,243 @@ export function activityLine(ev: ActivityEvent): [string, string] {
   const [sentence] = latelyLine(ev);
   return [sentence, ''];
 }
+
+// ===== Decisions =====
+export interface DecisionRow extends Record<string, unknown> {
+  app_id: string;
+  app_short_code: string;
+  app_display_name: string;
+}
+
+export interface DecisionsAppStatus {
+  app_id: string;
+  app_short_code: string;
+  app_display_name: string;
+  reason?: string;
+  status?: number;
+  detail?: string;
+}
+
+export interface AnsweredDecisionSummary extends Record<string, unknown> {
+  id: string;
+  issue_id: string;
+  app_id: string;
+  app_short_code: string | null;
+  app_display_name: string | null;
+  decision_external_ref: string | null;
+  answer_value: string;
+  answer_options_snapshot: unknown;
+  rationale: string | null;
+  risk_class: RiskClass;
+  answered_by: string;
+  answered_at: string;
+  dispatched_at: string | null;
+}
+
+export interface DecisionsPayload {
+  apps_reached: DecisionsAppStatus[];
+  apps_unreachable: DecisionsAppStatus[];
+  apps_unwired: DecisionsAppStatus[];
+  decisions: DecisionRow[];
+  answered_recent: AnsweredDecisionSummary[];
+  generated_at?: string;
+}
+
+export type DecisionOwnerFilter = 'all' | 'operator' | 'client' | 'unknown';
+export type DecisionAgeFilter = 'all' | '0-2' | '3-7' | '8+';
+export type DecisionSort = 'oldest' | 'newest';
+export interface DecisionsFilters {
+  app_id?: string;
+  owner_kind?: DecisionOwnerFilter;
+  age?: DecisionAgeFilter;
+  sort?: DecisionSort;
+}
+
+const emptyDecisionsPayload: DecisionsPayload = {
+  apps_reached: [],
+  apps_unreachable: [],
+  apps_unwired: [],
+  decisions: [],
+  answered_recent: [],
+};
+
+function parseDecisionsAppStatus(value: unknown): DecisionsAppStatus {
+  const rec = asRecord(value);
+  return {
+    app_id: asString(rec.app_id) ?? '',
+    app_short_code: asString(rec.app_short_code) ?? '',
+    app_display_name: asString(rec.app_display_name) ?? '',
+    reason: asString(rec.reason) ?? undefined,
+    status: asNumber(rec.status) ?? undefined,
+    detail: asString(rec.detail) ?? undefined,
+  };
+}
+
+function parseDecisionRow(value: unknown): DecisionRow {
+  if (!isRecord(value)) throw new Error('cc-read-decisions payload contains an invalid decision row');
+  const appId = asString(value.app_id);
+  const appShortCode = asString(value.app_short_code);
+  const appDisplayName = asString(value.app_display_name);
+  if (!appId || !appShortCode || !appDisplayName) throw new Error('cc-read-decisions decision row is missing app tags');
+  return { ...value, app_id: appId, app_short_code: appShortCode, app_display_name: appDisplayName };
+}
+
+function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
+  if (!isRecord(value)) throw new Error('cc-read-decisions payload contains an invalid answered decision row');
+  const id = asString(value.id);
+  const issueId = asString(value.issue_id);
+  const appId = asString(value.app_id);
+  const answerValue = asString(value.answer_value);
+  const riskClass = RISK_CLASSES.has(asString(value.risk_class) as RiskClass) ? asString(value.risk_class) as RiskClass : 'authorize';
+  const answeredBy = asString(value.answered_by);
+  const answeredAt = asString(value.answered_at);
+  if (!id || !issueId || !appId || !answerValue || !answeredBy || !answeredAt) {
+    throw new Error('cc-read-decisions answered row is missing required fields');
+  }
+  return {
+    ...value,
+    id,
+    issue_id: issueId,
+    app_id: appId,
+    app_short_code: asString(value.app_short_code),
+    app_display_name: asString(value.app_display_name),
+    decision_external_ref: asString(value.decision_external_ref),
+    answer_value: answerValue,
+    answer_options_snapshot: value.answer_options_snapshot,
+    rationale: asString(value.rationale),
+    risk_class: riskClass,
+    answered_by: answeredBy,
+    answered_at: answeredAt,
+    dispatched_at: asString(value.dispatched_at),
+  };
+}
+
+function parseDecisionsPayload(value: unknown): DecisionsPayload {
+  if (!isRecord(value) || !Array.isArray(value.decisions) || !Array.isArray(value.answered_recent)) {
+    throw new Error('cc-read-decisions payload is invalid');
+  }
+  return {
+    apps_reached: Array.isArray(value.apps_reached) ? value.apps_reached.map(parseDecisionsAppStatus) : [],
+    apps_unreachable: Array.isArray(value.apps_unreachable) ? value.apps_unreachable.map(parseDecisionsAppStatus) : [],
+    apps_unwired: Array.isArray(value.apps_unwired) ? value.apps_unwired.map(parseDecisionsAppStatus) : [],
+    decisions: value.decisions.map(parseDecisionRow),
+    answered_recent: value.answered_recent.map(parseAnsweredDecisionSummary),
+    generated_at: asString(value.generated_at) ?? undefined,
+  };
+}
+
+function decisionOwnerKind(row: Record<string, unknown>): 'operator' | 'client' | 'unknown' {
+  const values = ['owner_type', 'owner_kind', 'answer_owner', 'owned_by', 'decision_owner']
+    .map((key) => asString(row[key])?.toLowerCase())
+    .filter(Boolean) as string[];
+  if (values.some((value) => value === 'operator' || value === 'blackrock' || value === 'blackrock_ai')) return 'operator';
+  if (values.some((value) => value === 'client' || value === 'customer')) return 'client';
+  const owner = asString(row.owner)?.toLowerCase() ?? asString(row.assignee)?.toLowerCase() ?? '';
+  if (['brian', 'operator', 'blackrock ai', 'blackrock'].includes(owner)) return 'operator';
+  if (owner) return 'client';
+  return 'unknown';
+}
+
+export function decisionAgeDays(row: Record<string, unknown>): number | null {
+  const direct = asNumber(row.age_days);
+  if (direct != null) return direct;
+  const age = asString(row.age)?.trim().toLowerCase();
+  if (age) {
+    const m = age.match(/^(\d+(?:\.\d+)?)\s*([mhdw])(?:in|ours?|ays?|eeks?)?$/);
+    if (m) {
+      const n = Number(m[1]);
+      const unit = m[2];
+      if (unit === 'm') return n / 1440;
+      if (unit === 'h') return n / 24;
+      if (unit === 'd') return n;
+      if (unit === 'w') return n * 7;
+    }
+  }
+  for (const key of ['opened_at', 'created_at', 'surfaced_at', 'last_seen_at', 'updated_at']) {
+    const raw = asString(row[key]);
+    if (!raw) continue;
+    const t = Date.parse(raw);
+    if (!Number.isNaN(t)) return Math.max(0, (Date.now() - t) / 86_400_000);
+  }
+  return null;
+}
+
+function decisionIssueId(row: Record<string, unknown>): string | null {
+  return asString(row.issue_id) ?? asString(row.cc_issue_id) ?? asString(row.control_plane_issue_id);
+}
+
+function filterDecisionRows(rows: DecisionRow[], filters: DecisionsFilters): DecisionRow[] {
+  return rows.filter((row) => {
+    if (filters.app_id && row.app_id !== filters.app_id) return false;
+    if (filters.owner_kind && filters.owner_kind !== 'all' && decisionOwnerKind(row) !== filters.owner_kind) return false;
+    const age = decisionAgeDays(row);
+    if (filters.age === '0-2' && (age == null || age > 2)) return false;
+    if (filters.age === '3-7' && (age == null || age < 3 || age > 7)) return false;
+    if (filters.age === '8+' && (age == null || age < 8)) return false;
+    return true;
+  });
+}
+
+function sortDecisionRows(rows: DecisionRow[], sort: DecisionSort = 'oldest'): DecisionRow[] {
+  return [...rows].sort((a, b) => {
+    const ageA = decisionAgeDays(a) ?? 0;
+    const ageB = decisionAgeDays(b) ?? 0;
+    return sort === 'oldest' ? ageB - ageA : ageA - ageB;
+  });
+}
+
+function buildDecisionParams(filters: DecisionsFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.app_id) params.set('app_id', filters.app_id);
+  if (filters.owner_kind && filters.owner_kind !== 'all') params.set('owner_kind', filters.owner_kind);
+  if (filters.age === '0-2') params.set('max_age_days', '2');
+  params.set('limit', '300');
+  return params;
+}
+
+function demoDecisionsPayload(filters: DecisionsFilters): DecisionsPayload {
+  const rows = DEMO_APPS.flatMap((app) => DEMO_APP_DETAIL.decisions.items.map((item, index) => {
+    const row = structuredClone(item) as Record<string, unknown>;
+    const sourceId = asString(row.id) ?? `decision-${index + 1}`;
+    return {
+      ...row,
+      id: `${app.id}-${sourceId}`,
+      issue_id: `demo-${app.id}-open-decisions`,
+      app_id: app.id,
+      app_short_code: app.short_code,
+      app_display_name: app.display_name,
+    } as DecisionRow;
+  }));
+  const decisions = sortDecisionRows(filterDecisionRows(rows, filters), filters.sort);
+  return {
+    ...structuredClone(emptyDecisionsPayload),
+    apps_reached: DEMO_APPS.map((app) => ({ app_id: app.id, app_short_code: app.short_code, app_display_name: app.display_name, reason: 'demo' })),
+    decisions,
+    answered_recent: [],
+    generated_at: new Date().toISOString(),
+  };
+}
+
+export async function loadDecisions(filters: DecisionsFilters, demo: boolean): Promise<DecisionsPayload> {
+  if (demo) return demoDecisionsPayload(filters);
+  const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams(filters)));
+  return { ...payload, decisions: sortDecisionRows(filterDecisionRows(payload.decisions, filters), filters.sort) };
+}
+
+export function decisionRowId(row: Record<string, unknown>): string {
+  const appId = asString(row.app_id) ?? 'app';
+  const localId = asString(row.id) ?? asString(row.external_ref) ?? asString(row.decision_id) ?? decisionRowTitle(row);
+  return `${appId}:${localId}`;
+}
+
+export function decisionRowTitle(row: Record<string, unknown>): string {
+  return asString(row.title) ?? asString(row.name) ?? asString(row.summary) ?? asString(row.source) ?? 'Untitled decision';
+}
+
+export function decisionRowOwnerKind(row: Record<string, unknown>): 'operator' | 'client' | 'unknown' {
+  return decisionOwnerKind(row);
+}
+
+export function decisionRowIssueId(row: Record<string, unknown>): string | null {
+  return decisionIssueId(row);
+}

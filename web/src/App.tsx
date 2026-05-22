@@ -7,12 +7,14 @@ import { Shell, HomeView, type ShellPage } from './Home';
 import { FilesView, type FilesViewHandle } from './Files';
 import { AppDetailView } from './AppDetail';
 import { AgentsView, type AgentsViewHandle } from './Agents';
+import { DecisionsView, type DecisionsViewHandle } from './Decisions';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
 
 function pageFromHash(): ShellPage {
   const hash = window.location.hash || '#/';
+  if (hash === '#/decisions') return 'decisions';
   if (hash === '#/agents') return 'agents';
   if (hash === '#/files') return 'files';
   const appMatch = hash.match(/^#\/apps\/([a-z0-9-]+)$/i);
@@ -21,6 +23,7 @@ function pageFromHash(): ShellPage {
 }
 
 function hashForPage(page: ShellPage): string {
+  if (page === 'decisions') return '#/decisions';
   if (page === 'agents') return '#/agents';
   if (page === 'files') return '#/files';
   if (page.startsWith('app:')) return `#/apps/${page.slice(4)}`;
@@ -41,6 +44,7 @@ export default function App() {
   const [err, setErr] = useState('');
   const filesRef = useRef<FilesViewHandle | null>(null);
   const agentsRef = useRef<AgentsViewHandle | null>(null);
+  const decisionsRef = useRef<DecisionsViewHandle | null>(null);
 
   useEffect(() => {
     void load();
@@ -79,6 +83,10 @@ export default function App() {
       await agentsRef.current?.refresh();
       return;
     }
+    if (page === 'decisions') {
+      await decisionsRef.current?.refresh();
+      return;
+    }
     await load();
   }
 
@@ -94,6 +102,8 @@ export default function App() {
         <FilesView ref={filesRef} />
       ) : page === 'agents' ? (
         <AgentsView ref={agentsRef} demo={INITIAL_DEMO} />
+      ) : page === 'decisions' ? (
+        <DecisionsView ref={decisionsRef} demo={INITIAL_DEMO} />
       ) : slugFromPage(page) ? (
         <>
           {loadState === 'loading' && <Loading />}
