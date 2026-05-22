@@ -17,6 +17,18 @@ export type WorkOrder = {
   pr_url: string | null;
 };
 
+export type RewriteTask = {
+  id: string;
+  app_id: string;
+  issue_id: string;
+  decision_external_ref: string;
+  raw_decision_title: string;
+  raw_decision_body: string | null;
+  options_snapshot: unknown;
+  attempt_count: number;
+  max_attempts: number;
+};
+
 export type AgentRunStatus = "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
 
 export type AgentRun = {
@@ -56,6 +68,9 @@ export interface ControlPlane {
   finishAgentRun(runId: string, input: FinishRunInput): Promise<AgentRun>;
   getGitHubInstallationId(appId: string): Promise<string | null>;
   writeAuditEvent(appId: string | null, actor: string, eventType: string, detail: Record<string, unknown>): Promise<void>;
+  claimRewriteTask(runnerId: string, leaseSeconds: number): Promise<RewriteTask | null>;
+  finishRewriteTask(sendId: string, runnerId: string, subject: string, body: string, options: unknown): Promise<RewriteTask>;
+  failRewriteTask(sendId: string, runnerId: string, error: string): Promise<RewriteTask>;
 }
 
 export class ControlPlaneHttpError extends Error {
@@ -179,6 +194,29 @@ export class SupabaseControlPlane implements ControlPlane {
     });
   }
 
+  async claimRewriteTask(runnerId: string, leaseSeconds: number): Promise<RewriteTask | null> {
+    const row = await this.rpc<unknown>("cc_claim_rewrite_task", { p_runner: runnerId, p_lease_seconds: leaseSeconds });
+    return asRewriteTaskOrNull(row);
+  }
+
+  async finishRewriteTask(sendId: string, runnerId: string, subject: string, body: string, options: unknown): Promise<RewriteTask> {
+    return await this.rpc<RewriteTask>("cc_finish_rewrite_task", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_rewritten_subject: subject,
+      p_rewritten_body: body,
+      p_options_snapshot: options,
+    });
+  }
+
+  async failRewriteTask(sendId: string, runnerId: string, error: string): Promise<RewriteTask> {
+    return await this.rpc<RewriteTask>("cc_fail_rewrite_task", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_error: error.slice(0, 2000),
+    });
+  }
+
   private async updateAgentRun(runId: string, input: Record<string, unknown>): Promise<AgentRun> {
     const payload = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
     const rows = await this.rest<AgentRun[]>(`/rest/v1/agent_runs?id=eq.${encodeURIComponent(runId)}`, {
@@ -225,4 +263,11 @@ function asWorkOrderOrNull(value: unknown): WorkOrder | null {
   const row = value as Partial<WorkOrder>;
   if (typeof row.id !== "string" || !row.id) return null;
   return row as WorkOrder;
+}
+
+function asRewriteTaskOrNull(value: unknown): RewriteTask | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<RewriteTask>;
+  if (typeof row.id !== "string" || !row.id) return null;
+  return row as RewriteTask;
 }

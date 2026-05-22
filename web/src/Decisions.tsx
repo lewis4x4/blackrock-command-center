@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
+import { DecisionRouteModal } from './DecisionRouteModal';
 import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
   ago, colorFor, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions,
@@ -205,6 +206,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
   const owner = decisionRowOwnerKind(decision);
   const risk = riskClass(decision);
   const options = decisionOptions(decision);
+  const emailState = decisionEmailState(decision);
   return (
     <button className={'decision-card ' + owner} onClick={() => onOpen(decision)}>
       <div className="decision-card-top">
@@ -222,10 +224,11 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         <span>{ownerLabel(owner)} owned</span>
         <span>{ageLabel(decision)}</span>
         <span>{text(decision.status) ?? 'open'}</span>
+        {emailState && <span className={'decision-state-badge ' + emailState}>{emailState.replace(/_/g, ' ')}</span>}
       </div>
       <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
       {owner === 'client' && (
-        <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); alert('Routing decisions to clients arrives in Phase 5.'); }}>Route to client</span>
+        <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to client</span>
       )}
     </button>
   );
@@ -284,6 +287,7 @@ function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; load
 function DecisionDrawer({ decision, demo, onClose, onAnswered }: { decision: DecisionRow; demo: boolean; onClose: () => void; onAnswered: () => void | Promise<void> }) {
   const rows = useMemo(() => [decision], [decision]);
   const flow = useDecisionAnswerFlow({ rows, demo, issueIdForRow: decisionRowIssueId });
+  const [routingRow, setRoutingRow] = useState<Record<string, unknown> | null>(null);
 
   async function closeAfterMaybeRefresh() {
     if (flow.completed) await onAnswered();
@@ -308,8 +312,10 @@ function DecisionDrawer({ decision, demo, onClose, onAnswered }: { decision: Dec
         empty={false}
         emptyCopy="No decision detail returned."
         showRouteToClient
+        onRouteClient={setRoutingRow}
         missingIssueCopy="This app returned a decision row without issue_id/cc_issue_id. The row is visible, but answering requires the app to include the control-plane issue id."
       />
+      <DecisionRouteModal open={!!routingRow} demo={demo} appId={decision.app_id} issueId={decisionRowIssueId(decision)} decision={routingRow ?? {}} onClose={() => setRoutingRow(null)} onSent={onAnswered} />
     </SlideOver>
   );
 }
@@ -359,6 +365,18 @@ function decisionOptions(row: Record<string, unknown>): { id: string; label: str
     const label = text(item.label) ?? text(item.name) ?? text(item.title) ?? id;
     return id && label ? { id, label } : null;
   }).filter((item): item is { id: string; label: string } => !!item);
+}
+
+function decisionEmailState(row: Record<string, unknown>): string | null {
+  const direct = text(row.decision_email_state) ?? text(row.email_state) ?? text(row.routing_state);
+  const status = text(row.status)?.toLowerCase();
+  const raw = (direct ?? (status === 'routed_to_client' ? 'routed' : status === 'answered' ? 'answered' : null))?.toLowerCase();
+  if (!raw) return 'unrouted';
+  if (['unrouted', 'routed', 'link_clicked', 'awaiting_operator_confirm', 'answered', 'expired'].includes(raw)) return raw;
+  if (raw === 'clicked') return 'link_clicked';
+  if (raw === 'replied' || raw === 'extracting') return 'awaiting_operator_confirm';
+  if (raw === 'sent' || raw === 'delivered' || raw === 'opened') return 'routed';
+  return null;
 }
 
 function riskClass(row: Record<string, unknown>): string {

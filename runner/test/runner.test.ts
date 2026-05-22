@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { MockWorkspaceManager } from "../src/workspace";
 import { executeWorkOrder, type RunnerDeps } from "../src/runner";
 import { MockGitHubApp } from "../src/githubApp";
-import type { AgentRun, ControlPlane, FinishRunInput, UsageUpdate, WorkOrder } from "../src/controlPlane";
-import type { ClaudeCodeRunner, ClaudeGoalInput, ClaudeGoalResult } from "../src/claudeCode";
+import type { AgentRun, ControlPlane, FinishRunInput, RewriteTask, UsageUpdate, WorkOrder } from "../src/controlPlane";
+import type { ClaudeCodeRunner, ClaudeGoalInput, ClaudeGoalResult, ClaudePromptInput } from "../src/claudeCode";
 import { createLogger } from "../src/log";
 
 const tempRoots: string[] = [];
@@ -49,6 +49,9 @@ class FakeControlPlane implements ControlPlane {
   audits: Array<{ eventType: string; actor: string }> = [];
 
   async claimWorkOrder(): Promise<WorkOrder | null> { return null; }
+  async claimRewriteTask(): Promise<RewriteTask | null> { return null; }
+  async finishRewriteTask(): Promise<RewriteTask> { throw new Error('not implemented in test fake'); }
+  async failRewriteTask(): Promise<RewriteTask> { throw new Error('not implemented in test fake'); }
   async renewLease(): Promise<WorkOrder | null> { this.heartbeats += 1; return sampleWorkOrder(); }
   async completeWorkOrder(workOrderId: string, prUrl: string): Promise<WorkOrder> {
     this.completed.push({ workOrderId, prUrl });
@@ -85,6 +88,9 @@ class FakeControlPlane implements ControlPlane {
 
 class RecordingClaude implements ClaudeCodeRunner {
   brief = "";
+  async runPrompt(_input: ClaudePromptInput): Promise<ClaudeGoalResult> {
+    throw new Error('not implemented in test fake');
+  }
   async runGoal(input: ClaudeGoalInput): Promise<ClaudeGoalResult> {
     this.brief = await readFile(input.briefPath, "utf8");
     return {
@@ -99,6 +105,9 @@ class RecordingClaude implements ClaudeCodeRunner {
 }
 
 class FailingClaude implements ClaudeCodeRunner {
+  async runPrompt(_input: ClaudePromptInput): Promise<ClaudeGoalResult> {
+    throw new Error('Claude Code exploded');
+  }
   async runGoal(): Promise<ClaudeGoalResult> {
     throw new Error("Claude Code exploded");
   }

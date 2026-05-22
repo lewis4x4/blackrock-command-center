@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { SlideOver } from './SlideOver';
+import { DecisionRouteModal } from './DecisionRouteModal';
 import {
   answerIssue, ago, dispatchFromAnswer, loadAppDetailSection,
   type AppRow, type DetailSectionPayload, type IssueAction, type IssueRow, type RiskClass,
@@ -92,6 +93,7 @@ export function OpenDecisionsPanel(props: PanelProps) {
   const { issue, app, onClose, onResolved, demo = false } = props;
   const { state, rows, error } = usePanelSection(app.id, demo, 'decisions');
   const flow = useDecisionAnswerFlow({ rows, demo, issueIdForRow: () => issue.id });
+  const [routingRow, setRoutingRow] = useState<Record<string, unknown> | null>(null);
 
   function closeAfterMaybeRefresh() {
     if (flow.completed) onResolved();
@@ -109,12 +111,13 @@ export function OpenDecisionsPanel(props: PanelProps) {
         )}
       </>
     )}>
-      <DecisionAnswerBody flow={flow} state={state} error={error} empty={rows.length === 0} emptyCopy="No decisions returned for this app yet." />
+      <DecisionAnswerBody flow={flow} state={state} error={error} empty={rows.length === 0} emptyCopy="No decisions returned for this app yet." onRouteClient={setRoutingRow} />
+      <DecisionRouteModal open={!!routingRow} demo={demo} appId={app.id} issueId={issue.id} decision={routingRow ?? {}} onClose={() => setRoutingRow(null)} onSent={onResolved} />
     </SlideOver>
   );
 }
 
-export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showRouteToClient = false, missingIssueCopy = 'This decision row is missing a control-plane issue id, so it cannot be answered from Command Center yet.' }: {
+export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showRouteToClient = false, missingIssueCopy = 'This decision row is missing a control-plane issue id, so it cannot be answered from Command Center yet.', onRouteClient }: {
   flow: ReturnType<typeof useDecisionAnswerFlow>;
   state: LoadState;
   error: string;
@@ -122,6 +125,7 @@ export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showR
   emptyCopy: string;
   showRouteToClient?: boolean;
   missingIssueCopy?: string;
+  onRouteClient?: (row: Record<string, unknown>) => void;
 }) {
   return (
     <>
@@ -170,8 +174,8 @@ export function DecisionAnswerBody({ flow, state, error, empty, emptyCopy, showR
               <div className="panel-card" key={rowId(row)}>
                 <b>{rowTitle(row)}</b>
                 <span>{rowMeta(row, ['owner', 'owner_type', 'owner_kind', 'age', 'status'])}</span>
-                <div className="panel-note">Client decision — routing arrives in Phase 5. No email is sent in this MVP.</div>
-                {showRouteToClient && <button className="ghost-btn panel-source" onClick={() => alert('Routing decisions to clients arrives in Phase 5.')}>Route to client</button>}
+                <div className="panel-note">Client decision — route it to the app’s decision recipients for confirmation.</div>
+                {(showRouteToClient || onRouteClient) && <button className="ghost-btn panel-source" onClick={() => onRouteClient?.(row)}>Route to client</button>}
               </div>
             ))}
           </div>

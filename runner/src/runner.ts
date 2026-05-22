@@ -1,5 +1,5 @@
 import type { ClaudeCodeRunner, ClaudeGoalResult } from "./claudeCode";
-import type { ControlPlane, WorkOrder } from "./controlPlane";
+import type { ControlPlane, RewriteTask, WorkOrder } from "./controlPlane";
 import type { GitHubPullRequestClient, GitHubTokenProvider } from "./githubApp";
 import type { Logger } from "./log";
 import type { WorkspaceManager, Workspace } from "./workspace";
@@ -50,15 +50,24 @@ export class RunnerDaemon {
       poll_interval_seconds: this.options.pollIntervalSeconds,
       lease_seconds: this.options.leaseSeconds,
     });
+    this.deps.logger.info("rewrite_decision poll loop started", {
+      runner_id: this.options.runnerId,
+      task_type: "rewrite_decision",
+    });
 
     while (!this.stopping) {
       const workOrder = await this.deps.controlPlane.claimWorkOrder(this.options.runnerId, this.options.leaseSeconds);
-      if (!workOrder) {
+      if (workOrder) {
+        this.current = executeWorkOrder(workOrder, this.deps, this.options);
+      } else {
+        const rewriteTask = await this.deps.controlPlane.claimRewriteTask(this.options.runnerId, this.options.leaseSeconds);
+        this.current = rewriteTask ? executeRewriteTask(rewriteTask, this.deps, this.options) : null;
+      }
+      if (!this.current) {
         await sleep(this.options.pollIntervalSeconds * 1000, () => this.stopping);
         continue;
       }
 
-      this.current = executeWorkOrder(workOrder, this.deps, this.options);
       try {
         await this.current;
       } finally {
@@ -69,6 +78,99 @@ export class RunnerDaemon {
     if (this.current) await this.current;
     this.deps.logger.info("runner daemon stopped");
   }
+}
+
+export async function executeRewriteTask(task: RewriteTask, deps: Pick<RunnerDeps, "controlPlane" | "claudeCode" | "logger">, options: Pick<RunnerOptions, "runnerId">): Promise<ExecuteResult> {
+  const { controlPlane, claudeCode, logger } = deps;
+  logger.info("rewrite_decision task claimed", {
+    send_id: task.id,
+    app_id: task.app_id,
+    issue_id: task.issue_id,
+    attempt_count: task.attempt_count,
+  });
+  try {
+    const prompt = buildRewritePrompt(task);
+    const result = await claudeCode.runPrompt({ prompt });
+    const parsed = parseRewriteOutput(result.stdout);
+    const fallbackOptions = normalizeRewriteOptions(task.options_snapshot);
+    const rewrittenOptions = parsed.rewritten_options.length ? parsed.rewritten_options : fallbackOptions;
+    await controlPlane.finishRewriteTask(task.id, options.runnerId, parsed.rewritten_subject, parsed.rewritten_body, rewrittenOptions);
+    logger.info("rewrite_decision task completed", { send_id: task.id });
+    return { status: "succeeded" };
+  } catch (error) {
+    const message = compactError(error);
+    logger.error("rewrite_decision task failed", { send_id: task.id, error: message });
+    try {
+      await controlPlane.failRewriteTask(task.id, options.runnerId, message);
+    } catch (failError) {
+      logger.error("failed to mark rewrite_decision task failed", { send_id: task.id, error: compactError(failError) });
+    }
+    return { status: "failed", error: message };
+  }
+}
+
+type RewriteOutput = {
+  rewritten_subject: string;
+  rewritten_body: string;
+  rewritten_options: Array<{ id: string; label: string }>;
+};
+
+function buildRewritePrompt(task: RewriteTask): string {
+  return [
+    "You rewrite technical client decisions into friendly customer-facing email copy.",
+    "Return ONLY valid JSON with keys: rewritten_subject, rewritten_body, rewritten_options.",
+    "Rules:",
+    "- Keep the meaning exactly the same.",
+    "- Keep every option id exactly the same.",
+    "- Rewrite option labels into plain English.",
+    "- Keep the body brief, polite, and natural from Brian Lewis.",
+    "- Do not add facts not present in the raw decision.",
+    "",
+    JSON.stringify({
+      decision_external_ref: task.decision_external_ref,
+      raw_title: task.raw_decision_title,
+      raw_body: task.raw_decision_body,
+      options: normalizeRewriteOptions(task.options_snapshot),
+    }, null, 2),
+  ].join("\n");
+}
+
+function parseRewriteOutput(stdout: string): RewriteOutput {
+  const jsonText = extractJsonObject(stdout);
+  const parsed = JSON.parse(jsonText) as Partial<RewriteOutput>;
+  const subject = typeof parsed.rewritten_subject === "string" ? parsed.rewritten_subject.trim() : "";
+  const body = typeof parsed.rewritten_body === "string" ? parsed.rewritten_body.trim() : "";
+  if (!subject || !body) throw new Error("Claude rewrite output missing rewritten_subject or rewritten_body");
+  return {
+    rewritten_subject: subject.slice(0, 300),
+    rewritten_body: body.slice(0, 8000),
+    rewritten_options: normalizeRewriteOptions(parsed.rewritten_options),
+  };
+}
+
+function extractJsonObject(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+  const source = fenced ?? text;
+  const start = source.indexOf("{");
+  const end = source.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("Claude rewrite output did not contain a JSON object");
+  return source.slice(start, end + 1);
+}
+
+function normalizeRewriteOptions(value: unknown): Array<{ id: string; label: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (typeof item === "string" && item.trim()) return { id: item.trim(), label: item.trim() };
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const rec = item as Record<string, unknown>;
+    const id = stringValue(rec.id) ?? stringValue(rec.value) ?? stringValue(rec.key);
+    if (!id) return null;
+    return { id, label: stringValue(rec.label) ?? stringValue(rec.name) ?? stringValue(rec.title) ?? id };
+  }).filter((item): item is { id: string; label: string } => !!item);
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, options: Pick<RunnerOptions, "runnerId" | "leaseSeconds">): Promise<ExecuteResult> {

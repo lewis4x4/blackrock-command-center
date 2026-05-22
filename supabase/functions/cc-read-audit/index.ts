@@ -48,7 +48,10 @@ const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   "app_updated",
   "decision_answered",
   "issue_resolved",
+  "decision_rewrite_ready",
   "decision_routed",
+  "decision_answered_by_recipient",
+  "decision_email_bounced",
   "decision_reply_received",
   "work_order_created",
   "work_order_gated",
@@ -134,6 +137,12 @@ function latelyMapping(eventType: string | null, registry: Record<string, unknow
       return { visible: false, sentence: null, tone: "plain" };
     case "app_updated":
       return { visible: true, sentence: `${app}'s registry basics were updated.`, tone: "plain" };
+    case "decision_rewrite_ready":
+      return { visible: true, sentence: `A client decision email for ${app} is ready for review.`, tone: "needs" };
+    case "decision_answered_by_recipient":
+      return { visible: true, sentence: `A recipient confirmed a decision on ${app}.`, tone: "plain" };
+    case "decision_email_bounced":
+      return { visible: true, sentence: `A decision email for ${app} bounced.`, tone: "failure" };
     case "pr_opened":
       return { visible: true, sentence: `${app} has a PR ready for review.`, tone: "plain" };
     case "work_order_failed":

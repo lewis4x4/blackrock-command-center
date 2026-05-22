@@ -183,6 +183,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let linearRows: unknown[];
   let repoRows: unknown[];
   let ownerRows: unknown[];
+  let decisionRecipientRows: unknown[];
   let integrationRows: unknown[];
   let snapshotRows: unknown[];
 
@@ -193,6 +194,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       linearRows,
       repoRows,
       ownerRows,
+      decisionRecipientRows,
       integrationRows,
       snapshotRows,
     ] = await Promise.all([
@@ -201,6 +203,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       cpGet(`registry_app_linear?app_id=eq.${appId}&select=workspace_name,team_key,api_key_ref,webhook_secret_ref,status_map,stream_project_map&limit=1`),
       cpGet(`registry_app_repo?app_id=eq.${appId}&select=github_repo,default_branch,roadmap_doc_path,github_install_id&limit=1`),
       cpGet(`registry_app_owners?app_id=eq.${appId}&select=person_name,person_email,portal_role,is_decision_owner`),
+      cpGet(`registry_app_decision_recipients?app_id=eq.${appId}&deleted_at=is.null&select=id,app_id,contact_name,contact_email,contact_role,active,created_at,updated_at&order=contact_name.asc`),
       cpGet(`registry_app_integrations?app_id=eq.${appId}&select=integration_type,status,last_verified_at`),
       cpGet(`registry_app_snapshots?app_id=eq.${appId}&select=*&order=captured_at.desc&limit=1`),
     ]);
@@ -224,6 +227,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
     person_email: asString(row.person_email),
     portal_role: asString(row.portal_role),
     is_decision_owner: row.is_decision_owner === true,
+  }));
+
+  const decision_recipients = decisionRecipientRows.filter(isRecord).map((row) => ({
+    id: asString(row.id),
+    app_id: asString(row.app_id),
+    contact_name: asString(row.contact_name),
+    contact_email: asString(row.contact_email),
+    contact_role: asString(row.contact_role),
+    active: row.active === true,
+    created_at: asString(row.created_at),
+    updated_at: asString(row.updated_at),
   }));
 
   const integrations = integrationRows.filter(isRecord).map((row) => ({
@@ -269,6 +283,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     linear,
     repo,
     owners,
+    decision_recipients,
     integrations,
     latest_snapshot: latestSnapshot,
     generated_at: new Date().toISOString(),

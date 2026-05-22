@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
 import { ProjectGrid } from './Home';
 import {
-  ago, editAppBasics, registerApp,
-  type AppRow, type EditAppPayload, type RegisterAppPayload,
+  addDecisionRecipient, ago, deleteDecisionRecipient, editAppBasics, editDecisionRecipient, loadDecisionRecipients, registerApp,
+  type AppRow, type DecisionRecipient, type EditAppPayload, type RegisterAppPayload,
 } from './lib';
 
 export function AppsView({ apps, demo, onChanged }: { apps: AppRow[]; demo: boolean; onChanged: () => void | Promise<void> }) {
@@ -91,6 +91,18 @@ function EditAppDrawer({ app, demo, onClose, onSaved }: { app: AppRow; demo: boo
   const [criticality, setCriticality] = useState(String(app.criticality));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [recipients, setRecipients] = useState<DecisionRecipient[]>([]);
+  const [recipientsLoading, setRecipientsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRecipientsLoading(true);
+    loadDecisionRecipients(app.id, demo)
+      .then((rows) => { if (!cancelled) setRecipients(rows); })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (!cancelled) setRecipientsLoading(false); });
+    return () => { cancelled = true; };
+  }, [app.id, demo]);
 
   async function save() {
     setSaving(true);
@@ -135,7 +147,113 @@ function EditAppDrawer({ app, demo, onClose, onSaved }: { app: AppRow; demo: boo
         <span>Criticality</span>
         <input type="number" min="0" max="1000" step="1" value={criticality} onChange={(ev) => setCriticality(ev.target.value)} />
       </label>
+      <DecisionRecipientsEditor
+        app={app}
+        demo={demo}
+        recipients={recipients}
+        loading={recipientsLoading}
+        onRecipients={setRecipients}
+        onError={setError}
+      />
     </SlideOver>
+  );
+}
+
+function DecisionRecipientsEditor({ app, demo, recipients, loading, onRecipients, onError }: {
+  app: AppRow;
+  demo: boolean;
+  recipients: DecisionRecipient[];
+  loading: boolean;
+  onRecipients: (rows: DecisionRecipient[]) => void;
+  onError: (message: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [busy, setBusy] = useState('');
+  const [form, setForm] = useState({ contact_name: '', contact_email: '', contact_role: 'primary' });
+
+  function startAdd() {
+    setAdding(true);
+    setEditingId(null);
+    setForm({ contact_name: '', contact_email: '', contact_role: 'primary' });
+  }
+
+  function startEdit(row: DecisionRecipient) {
+    setAdding(false);
+    setEditingId(row.id);
+    setForm({ contact_name: row.contact_name, contact_email: row.contact_email, contact_role: row.contact_role ?? '' });
+  }
+
+  async function saveRecipient() {
+    setBusy('save');
+    onError('');
+    try {
+      if (editingId) {
+        const updated = await editDecisionRecipient(editingId, form, demo);
+        onRecipients(recipients.map((row) => row.id === editingId ? updated : row));
+      } else {
+        const created = await addDecisionRecipient(app.id, form, demo);
+        onRecipients([...recipients, created]);
+      }
+      setAdding(false);
+      setEditingId(null);
+      setForm({ contact_name: '', contact_email: '', contact_role: 'primary' });
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function removeRecipient(row: DecisionRecipient) {
+    setBusy(row.id);
+    onError('');
+    try {
+      await deleteDecisionRecipient(row.id, demo);
+      onRecipients(recipients.filter((item) => item.id !== row.id));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const editing = adding || editingId;
+
+  return (
+    <div className="panel-section apps-recipient-section">
+      <div className="panel-label">Decision recipients for {app.short_code}</div>
+      {loading ? <div className="detail-placeholder">Loading recipients…</div> : recipients.length === 0 ? (
+        <div className="detail-placeholder">No decision recipients yet.</div>
+      ) : (
+        <div className="panel-stack">
+          {recipients.map((row) => (
+            <div className="panel-card apps-recipient-row" key={row.id}>
+              <div>
+                <b>{row.contact_name}</b>
+                <span>{row.contact_email} · {row.contact_role ?? 'contact'}{row.active ? '' : ' · inactive'}</span>
+              </div>
+              <button className="ghost-btn" onClick={() => startEdit(row)} disabled={!!busy}>edit</button>
+              <button className="ghost-btn danger" onClick={() => void removeRecipient(row)} disabled={!!busy}>{busy === row.id ? 'removing…' : '×'}</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {editing ? (
+        <div className="answer-box apps-recipient-form">
+          <label><span>Name</span><input value={form.contact_name} onChange={(ev) => setForm({ ...form, contact_name: ev.target.value })} placeholder="Rylee" /></label>
+          <label><span>Email</span><input value={form.contact_email} onChange={(ev) => setForm({ ...form, contact_email: ev.target.value })} placeholder="rylee@qep.com" /></label>
+          <label><span>Role</span><input value={form.contact_role} onChange={(ev) => setForm({ ...form, contact_role: ev.target.value })} placeholder="primary" /></label>
+          <div className="apps-recipient-actions">
+            <button className="ghost-btn" onClick={() => { setAdding(false); setEditingId(null); }} disabled={!!busy}>Cancel</button>
+            <button className="btn-primary panel-primary" onClick={() => void saveRecipient()} disabled={!!busy || !form.contact_name.trim() || !form.contact_email.trim()}>{busy === 'save' ? 'Saving…' : 'Save recipient'}</button>
+          </div>
+        </div>
+      ) : (
+        <button className="ghost-btn panel-source" onClick={startAdd}>+ Add recipient</button>
+      )}
+      <div className="panel-note">QEP is seeded with plan placeholder emails. Replace them here if the operator has real Rylee/Ryan addresses.</div>
+    </div>
   );
 }
 

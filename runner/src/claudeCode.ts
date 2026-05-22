@@ -7,6 +7,12 @@ export type ClaudeGoalInput = {
   signal?: AbortSignal;
 };
 
+export type ClaudePromptInput = {
+  prompt: string;
+  cwd?: string;
+  signal?: AbortSignal;
+};
+
 export type ClaudeGoalResult = {
   exitCode: number;
   stdout: string;
@@ -18,6 +24,7 @@ export type ClaudeGoalResult = {
 
 export interface ClaudeCodeRunner {
   runGoal(input: ClaudeGoalInput): Promise<ClaudeGoalResult>;
+  runPrompt(input: ClaudePromptInput): Promise<ClaudeGoalResult>;
 }
 
 export class ClaudeGoalError extends Error {
@@ -35,15 +42,20 @@ export class RealClaudeCode implements ClaudeCodeRunner {
 
   async runGoal(input: ClaudeGoalInput): Promise<ClaudeGoalResult> {
     const brief = await readFile(input.briefPath, "utf8");
-    const prompt = `/goal\n\n${brief}`;
+    return await this.runPrompt(input.signal
+      ? { workspacePath: input.workspacePath, prompt: `/goal\n\n${brief}`, signal: input.signal } as ClaudePromptInput & { workspacePath: string }
+      : { workspacePath: input.workspacePath, prompt: `/goal\n\n${brief}` } as ClaudePromptInput & { workspacePath: string });
+  }
+
+  async runPrompt(input: ClaudePromptInput & { workspacePath?: string }): Promise<ClaudeGoalResult> {
     const proc = Bun.spawn([this.command, "-p"], {
-      cwd: input.workspacePath,
+      cwd: input.cwd ?? input.workspacePath ?? process.cwd(),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       env: buildClaudeEnv(process.env),
     });
-    proc.stdin?.write(prompt);
+    proc.stdin?.write(input.prompt);
     proc.stdin?.end();
 
     let aborted = false;
@@ -73,8 +85,8 @@ export class RealClaudeCode implements ClaudeCodeRunner {
         ...parseUsage(stdout, stderr),
       };
       if (timedOut) throw new ClaudeGoalError(`Claude Code timed out after ${this.timeoutSeconds}s`, result);
-      if (aborted || input.signal?.aborted) throw new ClaudeGoalError("Claude Code aborted after lease renewal failed", result);
-      if (exitCode !== 0) throw new ClaudeGoalError(`Claude Code /goal failed with exit code ${exitCode}: ${stderr || stdout}`, result);
+      if (aborted || input.signal?.aborted) throw new ClaudeGoalError("Claude Code aborted", result);
+      if (exitCode !== 0) throw new ClaudeGoalError(`Claude Code failed with exit code ${exitCode}: ${stderr || stdout}`, result);
       return result;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -87,12 +99,22 @@ export class MockClaudeCode implements ClaudeCodeRunner {
   async runGoal(input: ClaudeGoalInput): Promise<ClaudeGoalResult> {
     if (input.signal?.aborted) throw new Error("mock Claude aborted before start");
     const brief = await readFile(input.briefPath, "utf8");
+    return this.runPrompt(input.signal ? { prompt: `MOCK /goal received:\n${brief}`, signal: input.signal } : { prompt: `MOCK /goal received:\n${brief}` });
+  }
+
+  async runPrompt(input: ClaudePromptInput): Promise<ClaudeGoalResult> {
+    if (input.signal?.aborted) throw new Error("mock Claude aborted before start");
+    const prompt = input.prompt;
     return {
       exitCode: 0,
-      stdout: `MOCK /goal received:\n${brief}`,
+      stdout: JSON.stringify({
+        rewritten_subject: "Quick question about this decision",
+        rewritten_body: "Hey — quick question before we move this forward. Which option should we use?",
+        rewritten_options: [],
+      }),
       stderr: "",
       costUsd: 0,
-      tokensInput: Math.ceil(brief.length / 4),
+      tokensInput: Math.ceil(prompt.length / 4),
       tokensOutput: 42,
     };
   }

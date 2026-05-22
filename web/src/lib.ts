@@ -103,12 +103,24 @@ export interface DetailSectionPayload {
   items: Record<string, unknown>[];
   next_cursor: string | null;
 }
+export interface DecisionRecipient {
+  id: string;
+  app_id: string;
+  contact_name: string;
+  contact_email: string;
+  contact_role: string | null;
+  active: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface AppDetailPayload {
   available: boolean;
   message?: string;
   roadmap: DetailSectionPayload;
   decisions: DetailSectionPayload;
   sync: DetailSectionPayload;
+  decision_recipients?: DecisionRecipient[];
   generated_at?: string;
   last_snapshot_at?: string | null;
   key_class?: 'readonly' | 'service_role' | null;
@@ -267,7 +279,10 @@ export const LATELY_VISIBLE_EVENT_TYPES: readonly string[] = [
   'app_updated',
   'decision_answered',
   'issue_resolved',
+  'decision_rewrite_ready',
   'decision_routed',
+  'decision_answered_by_recipient',
+  'decision_email_bounced',
   'decision_reply_received',
   'work_order_created',
   'work_order_gated',
@@ -406,6 +421,10 @@ export const DEMO_APP_DETAIL: AppDetailPayload = {
       { source: 'Supabase snapshot', status: 'fresh', last_checked: isoAgo(8), contract_version: 1 },
     ],
   },
+  decision_recipients: [
+    { id: 'demo-rylee', app_id: 'qep', contact_name: 'Rylee', contact_email: 'rylee@qep.com', contact_role: 'primary', active: true },
+    { id: 'demo-ryan', app_id: 'qep', contact_name: 'Ryan McKenzie', contact_email: 'ryan@qep.com', contact_role: 'primary', active: true },
+  ],
 };
 
 export const DEMO_AGENTS: AgentsPayload = {
@@ -621,6 +640,26 @@ async function postJson(path: string, body: unknown): Promise<unknown> {
     headers: { ...readHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError(path, res.status, payload);
+  return payload;
+}
+
+async function publicPostJson(path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`${FUNCTIONS_URL}/${path}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError(path, res.status, payload);
+  return payload;
+}
+
+async function publicFetchJson(path: string, params?: URLSearchParams): Promise<unknown> {
+  const qs = params?.toString();
+  const res = await fetch(`${FUNCTIONS_URL}/${path}${qs ? `?${qs}` : ''}`, { credentials: 'include' });
   const payload: unknown = await res.json().catch(() => null);
   if (!res.ok) throw cleanError(path, res.status, payload);
   return payload;
@@ -1032,6 +1071,11 @@ export async function loadAppDetail(appId: string): Promise<unknown> {
   return fetchJson('cc-read-app', params);
 }
 
+export async function loadDecisionRecipients(appId: string, demo = false): Promise<DecisionRecipient[]> {
+  if (demo) return structuredClone(DEMO_APP_DETAIL.decision_recipients ?? []).map((row) => ({ ...row, app_id: appId }));
+  return parseAppDetailPayload(await loadAppDetail(appId)).decision_recipients ?? [];
+}
+
 function emptyDetailSection(): DetailSectionPayload {
   return { items: [], next_cursor: null };
 }
@@ -1046,15 +1090,31 @@ function normalizeDetailSection(value: unknown): DetailSectionPayload {
   };
 }
 
+function parseDecisionRecipient(value: unknown): DecisionRecipient {
+  const rec = asRecord(value);
+  return {
+    id: asString(rec.id) ?? '',
+    app_id: asString(rec.app_id) ?? '',
+    contact_name: asString(rec.contact_name) ?? '',
+    contact_email: asString(rec.contact_email) ?? '',
+    contact_role: asString(rec.contact_role),
+    active: rec.active === true,
+    created_at: asString(rec.created_at),
+    updated_at: asString(rec.updated_at),
+  };
+}
+
 function parseAppDetailPayload(value: unknown): AppDetailPayload {
   const rec = asRecord(value);
   const data = asRecord(rec.data ?? value);
   const keyClass = asString(rec.key_class);
+  const recipients = Array.isArray(rec.decision_recipients) ? rec.decision_recipients : Array.isArray(data.decision_recipients) ? data.decision_recipients : [];
   return {
     available: true,
     roadmap: normalizeDetailSection(data.roadmap),
     decisions: normalizeDetailSection(data.decisions),
     sync: normalizeDetailSection(data.sync),
+    decision_recipients: recipients.map(parseDecisionRecipient).filter((row) => row.id && row.contact_email),
     generated_at: asString(rec.generated_at) ?? undefined,
     last_snapshot_at: asString(rec.last_snapshot_at) ?? null,
     key_class: keyClass === 'readonly' || keyClass === 'service_role' ? keyClass : null,
@@ -1244,6 +1304,8 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
       return ['', false];
     case 'issue_resolved':
       return [`You answered a decision on ${app} — a build can move forward.`, true];
+    case 'decision_rewrite_ready':
+      return [`A client decision email for ${app} is ready for your review.`, true];
     case 'decision_answered': {
       const who = ev.actor.startsWith('client:') ? firstNameFromActor(ev.actor) : 'You';
       return [`${who} answered a decision on ${app} — a build can move now.`, true];
@@ -1252,6 +1314,12 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
       const owner = detailString(d, 'owner_name') ?? 'the owner';
       return [`A decision on ${app} was emailed to ${owner} to answer.`, true];
     }
+    case 'decision_answered_by_recipient': {
+      const owner = detailString(d, 'owner_name') ?? detailString(d, 'owner_email') ?? firstNameFromActor(ev.actor);
+      return [`${owner} confirmed a decision on ${app} — a build can move now.`, true];
+    }
+    case 'decision_email_bounced':
+      return [`A decision email for ${app} bounced — send it manually or fix the recipient.`, true];
     case 'decision_reply_received': {
       const owner = detailString(d, 'owner_name') ?? firstNameFromActor(ev.actor);
       return [`${owner} replied to a decision on ${app} — it's waiting for you to confirm their answer.`, true];
@@ -1302,6 +1370,7 @@ export function latelyTone(ev: ActivityEvent): LatelyTone {
   const d: Record<string, unknown> = ev.detail ?? {};
   if (
     ev.event_type === 'decision_reply_received' ||
+    ev.event_type === 'decision_rewrite_ready' ||
     ev.event_type === 'cost_ceiling_hit' ||
     ev.event_type === 'runner_offline' ||
     ev.event_type === 'handoff_created' ||
@@ -1309,6 +1378,7 @@ export function latelyTone(ev: ActivityEvent): LatelyTone {
     (ev.event_type === 'work_order_created' && isAuthorizeWorkOrder(d))
   ) return 'needs';
   if (
+    ev.event_type === 'decision_email_bounced' ||
     ev.event_type === 'snapshot_failed' ||
     ev.event_type === 'work_order_failed' ||
     ev.event_type === 'work_order_dead_lettered' ||
@@ -1385,6 +1455,34 @@ export async function registerApp(payload: RegisterAppPayload, demo = false): Pr
 }
 
 // ===== Decisions =====
+export type DecisionEmailState = 'queued' | 'rewriting' | 'rewrite_ready' | 'sent' | 'delivered' | 'opened' | 'clicked' | 'replied' | 'extracting' | 'awaiting_clarify' | 'clarify_sent' | 'answered' | 'done' | 'reminded' | 'bounced' | 'expired' | 'failed';
+
+export interface DecisionEmailSend extends Record<string, unknown> {
+  id: string;
+  state: DecisionEmailState;
+  app_id: string;
+  issue_id: string;
+  decision_external_ref: string;
+  raw_decision_title: string;
+  raw_decision_body: string | null;
+  rewritten_subject: string | null;
+  rewritten_body: string | null;
+  options_snapshot: unknown;
+  last_error: string | null;
+}
+
+export interface RewriteDecisionPayload {
+  issue_id: string;
+  app_id: string;
+  decision_external_ref: string;
+  raw_title: string;
+  raw_body?: string | null;
+  options: DecisionOptionLike[];
+  risk_class?: RiskClass;
+}
+
+export type DecisionOptionLike = { id: string; label: string };
+
 export interface DecisionRow extends Record<string, unknown> {
   app_id: string;
   app_short_code: string;
@@ -1604,6 +1702,115 @@ export async function loadDecisions(filters: DecisionsFilters, demo: boolean): P
   if (demo) return demoDecisionsPayload(filters);
   const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams(filters)));
   return { ...payload, decisions: sortDecisionRows(filterDecisionRows(payload.decisions, filters), filters.sort) };
+}
+
+function parseDecisionEmailSend(value: unknown): DecisionEmailSend {
+  const rec = asRecord(value);
+  return {
+    ...rec,
+    id: asString(rec.id) ?? '',
+    state: asString(rec.state) as DecisionEmailState,
+    app_id: asString(rec.app_id) ?? '',
+    issue_id: asString(rec.issue_id) ?? '',
+    decision_external_ref: asString(rec.decision_external_ref) ?? '',
+    raw_decision_title: asString(rec.raw_decision_title) ?? '',
+    raw_decision_body: asString(rec.raw_decision_body),
+    rewritten_subject: asString(rec.rewritten_subject),
+    rewritten_body: asString(rec.rewritten_body),
+    options_snapshot: rec.options_snapshot,
+    last_error: asString(rec.last_error),
+  };
+}
+
+export async function rewriteDecision(payload: RewriteDecisionPayload, demo = false): Promise<DecisionEmailSend> {
+  if (demo) return parseDecisionEmailSend({
+    id: `demo-send-${Date.now()}`,
+    state: 'rewrite_ready',
+    app_id: payload.app_id,
+    issue_id: payload.issue_id,
+    decision_external_ref: payload.decision_external_ref,
+    raw_decision_title: payload.raw_title,
+    raw_decision_body: payload.raw_body ?? null,
+    rewritten_subject: `Quick question about ${payload.decision_external_ref}`,
+    rewritten_body: `Hey — quick question before we move this forward.\n\n${payload.raw_title}`,
+    options_snapshot: payload.options,
+    last_error: null,
+  });
+  const result = asRecord(await postJson('cc-rewrite-decision', payload));
+  return parseDecisionEmailSend(result.send);
+}
+
+export async function loadDecisionSend(sendId: string, demo = false): Promise<DecisionEmailSend> {
+  if (demo) return parseDecisionEmailSend({ id: sendId, state: 'rewrite_ready', app_id: 'qep', issue_id: 'demo', decision_external_ref: 'demo', raw_decision_title: 'Demo decision', raw_decision_body: null, rewritten_subject: 'Demo subject', rewritten_body: 'Demo body', options_snapshot: [], last_error: null });
+  const params = new URLSearchParams();
+  params.set('send_id', sendId);
+  const result = asRecord(await fetchJson('cc-rewrite-decision', params));
+  return parseDecisionEmailSend(result.send);
+}
+
+export async function routeDecision(sendId: string, recipientIds: string[], approvedSubject: string, approvedBody: string, approvedOptions: DecisionOptionLike[], demo = false): Promise<unknown> {
+  if (demo) return { sent: recipientIds.map((id) => ({ id: `demo-routed-${id}`, state: 'sent' })) };
+  return postJson('cc-route-decision', { send_id: sendId, recipient_ids: recipientIds, approved_subject: approvedSubject, approved_body: approvedBody, approved_options: approvedOptions });
+}
+
+export async function addDecisionRecipient(appId: string, payload: Pick<DecisionRecipient, 'contact_name' | 'contact_email'> & { contact_role?: string | null }, demo = false): Promise<DecisionRecipient> {
+  if (demo) return { id: `demo-recipient-${Date.now()}`, app_id: appId, active: true, contact_role: payload.contact_role ?? null, contact_name: payload.contact_name, contact_email: payload.contact_email };
+  const result = asRecord(await postJson('cc-add-recipient', { app_id: appId, ...payload }));
+  return parseDecisionRecipient(result.recipient);
+}
+
+export async function editDecisionRecipient(recipientId: string, payload: Partial<Pick<DecisionRecipient, 'contact_name' | 'contact_email' | 'contact_role' | 'active'>>, demo = false): Promise<DecisionRecipient> {
+  if (demo) return { id: recipientId, app_id: 'demo', active: payload.active ?? true, contact_role: payload.contact_role ?? null, contact_name: payload.contact_name ?? 'Demo', contact_email: payload.contact_email ?? 'demo@example.com' };
+  const result = asRecord(await postJson('cc-edit-recipient', { recipient_id: recipientId, ...payload }));
+  return parseDecisionRecipient(result.recipient);
+}
+
+export async function deleteDecisionRecipient(recipientId: string, demo = false): Promise<void> {
+  if (demo) return;
+  await postJson('cc-delete-recipient', { recipient_id: recipientId });
+}
+
+export interface DecisionConfirmData extends Record<string, unknown> {
+  send_id: string;
+  selected_option_id: string;
+  csrf: string;
+  subject: string | null;
+  body: string | null;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  options: DecisionOptionLike[];
+  selected_option: DecisionOptionLike | null;
+  expires_at: string;
+}
+
+export async function loadDecisionConfirmData(token: string, sendId: string, optionId: string): Promise<DecisionConfirmData> {
+  const params = new URLSearchParams({ t: token, s: sendId, o: optionId });
+  const rec = asRecord(await publicFetchJson('cc-decision-confirm-data', params));
+  return {
+    ...rec,
+    send_id: asString(rec.send_id) ?? sendId,
+    selected_option_id: asString(rec.selected_option_id) ?? optionId,
+    csrf: asString(rec.csrf) ?? '',
+    subject: asString(rec.subject),
+    body: asString(rec.body),
+    recipient_name: asString(rec.recipient_name),
+    recipient_email: asString(rec.recipient_email),
+    options: Array.isArray(rec.options) ? rec.options.map(optionFromUnknown).filter((v): v is DecisionOptionLike => !!v) : [],
+    selected_option: optionFromUnknown(rec.selected_option),
+    expires_at: asString(rec.expires_at) ?? '',
+  };
+}
+
+export async function submitDecisionConfirm(token: string, sendId: string, optionId: string, csrf: string): Promise<unknown> {
+  return publicPostJson('cc-decision-confirm-submit', { token, send_id: sendId, option_id: optionId, csrf });
+}
+
+function optionFromUnknown(value: unknown): DecisionOptionLike | null {
+  if (typeof value === 'string' && value.trim()) return { id: value.trim(), label: value.trim() };
+  const rec = asRecord(value);
+  const id = asString(rec.id) ?? asString(rec.value) ?? asString(rec.key);
+  if (!id) return null;
+  return { id, label: asString(rec.label) ?? asString(rec.name) ?? asString(rec.title) ?? id };
 }
 
 export function decisionRowId(row: Record<string, unknown>): string {
