@@ -706,6 +706,17 @@ async function fetchJson(path: string, params?: URLSearchParams): Promise<unknow
   return res.payload;
 }
 
+// Some edge functions (e.g. cc-rewrite-decision) gate ALL methods behind the
+// write token, not just POST. Use this for GETs against those endpoints.
+async function fetchJsonWriteAuth(path: string, params?: URLSearchParams): Promise<unknown> {
+  const qs = params?.toString();
+  const url = `${FUNCTIONS_URL}/${path}${qs ? `?${qs}` : ''}`;
+  const res = await fetch(url, { method: 'GET', headers: writeHeaders() });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError(path, res.status, payload);
+  return payload;
+}
+
 async function postJson(path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${FUNCTIONS_URL}/${path}`, {
     method: 'POST',
@@ -2172,7 +2183,7 @@ export async function loadDecisionSend(sendId: string, demo = false): Promise<De
   if (demo) return parseDecisionEmailSend({ id: sendId, state: 'rewrite_ready', app_id: 'qep', issue_id: 'demo', decision_external_ref: 'demo', raw_decision_title: 'Demo decision', raw_decision_body: null, rewritten_subject: 'Demo subject', rewritten_body: 'Demo body', options_snapshot: [], last_error: null });
   const params = new URLSearchParams();
   params.set('send_id', sendId);
-  const result = asRecord(await fetchJson('cc-rewrite-decision', params));
+  const result = asRecord(await fetchJsonWriteAuth('cc-rewrite-decision', params));
   return parseDecisionEmailSend(result.send);
 }
 
