@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
+import { verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-approve-work-order";
 const CP_URL = Deno.env.get("SUPABASE_URL")!;
@@ -166,6 +167,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return buildJsonResponse({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
 
   let parsedJson: unknown;
   try { parsedJson = await req.json(); } catch { return buildJsonResponse({ error: "body must be valid JSON" }, 400, access.headerValue); }

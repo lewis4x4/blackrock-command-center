@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
+import { verifyWriteToken } from "../_shared/phase5.ts";
 
 // Browser write path for Apps edit basics. Auth mirrors cc-answer-issue:
 // Cloudflare Access JWT in production, or x-cc-read-token fallback in local/dev.
@@ -206,6 +207,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return buildJsonResponse({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
 
   const archive = new URL(req.url).searchParams.get("archive") === "true";
 

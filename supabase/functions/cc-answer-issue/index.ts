@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
+import { verifyWriteToken } from "../_shared/phase5.ts";
 
 // Browser write path for Phase 2 issue resolution. This function authenticates
 // the same way as cc-read-app-detail, validates the HTTP payload, and delegates
@@ -308,6 +309,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"),
   );
   if (!access.ok) {
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return buildJsonResponse({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
     return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
   }
 

@@ -626,6 +626,11 @@ function readHeaders(): Record<string, string> {
   return headers;
 }
 
+function writeHeaders(): Record<string, string> {
+  const writeToken = (import.meta as any).env?.VITE_CC_WRITE_TOKEN ?? '';
+  return { ...readHeaders(), 'x-cc-write-token': writeToken };
+}
+
 function cleanError(prefix: string, status: number, payload: unknown): Error {
   const body: EdgeErrorBody = isRecord(payload) ? payload : {};
   const parts = [asString(body.error), asString(body.detail)].filter(Boolean);
@@ -649,7 +654,7 @@ async function fetchJson(path: string, params?: URLSearchParams): Promise<unknow
 async function postJson(path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${FUNCTIONS_URL}/${path}`, {
     method: 'POST',
-    headers: { ...readHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...writeHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const payload: unknown = await res.json().catch(() => null);
@@ -1450,7 +1455,7 @@ export async function setAutoRoute(appId: string, enabled: boolean, demo = false
   const toggleToken = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_CC_AUTO_ROUTE_TOGGLE_TOKEN ?? '';
   const res = await fetch(`${FUNCTIONS_URL}/cc-set-auto-route`, {
     method: 'POST',
-    headers: { ...readHeaders(), 'Content-Type': 'application/json', 'x-cc-auto-route-toggle': toggleToken },
+    headers: { ...writeHeaders(), 'Content-Type': 'application/json', 'x-cc-auto-route-toggle': toggleToken },
     body: JSON.stringify({ app_id: appId, enabled }),
   });
   const payload: unknown = await res.json().catch(() => null);
@@ -1901,8 +1906,7 @@ export async function loadDecisions(filters: DecisionsFilters, demo: boolean): P
 }
 
 export async function loadPendingReviews(demo: boolean): Promise<PendingReviewSend[]> {
-  if (demo) return demoDecisionsPayload({}).pending_reviews ?? [];
-  const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams({})));
+  const payload = await loadDecisions({}, demo);
   return payload.pending_reviews ?? [];
 }
 

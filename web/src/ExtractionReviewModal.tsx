@@ -85,19 +85,19 @@ export function ExtractionReviewModal({
         <div className="panel-label">Decide</div>
         <label><input type="radio" checked={action === 'accept'} onChange={() => setAction('accept')} disabled={!acceptEnabled} /> Accept Claude's suggestion</label>
         <label><input type="radio" checked={action === 'pick'} onChange={() => setAction('pick')} /> Pick different option</label>
-        {action === 'pick' && <select value={optionId} onChange={(e) => setOptionId(e.target.value)}>{options.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}</select>}
+        {action === 'pick' && <label><span className="sr-only">Pick option</span><select aria-label="Pick option" value={optionId} onChange={(e) => setOptionId(e.target.value)}>{options.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}</select></label>}
         <label><input type="radio" checked={action === 'reject'} onChange={() => setAction('reject')} /> Reject as off-topic</label>
-        {action === 'reject' && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason" maxLength={500} />}
+        {action === 'reject' && <label><span className="sr-only">Reject reason</span><input aria-label="Reject reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason" maxLength={500} /></label>}
         <label><input type="radio" checked={action === 'clarify'} onChange={() => setAction('clarify')} /> Send clarification</label>
         {action === 'clarify' && (
           <div className="panel-stack">
-            <input value={clarifySubject} onChange={(e) => setClarifySubject(e.target.value)} placeholder="Subject" maxLength={200} />
-            <textarea value={clarifyBody} onChange={(e) => setClarifyBody(e.target.value)} rows={8} />
+            <label><span>Subject</span><input aria-label="Clarification subject" value={clarifySubject} onChange={(e) => setClarifySubject(e.target.value)} placeholder="Subject" maxLength={200} /></label>
+            <label><span>Body</span><textarea aria-label="Clarification body" value={clarifyBody} onChange={(e) => setClarifyBody(e.target.value)} rows={8} /></label>
             <label><input type="checkbox" checked={includeButtons} onChange={(e) => setIncludeButtons(e.target.checked)} /> Include the three option buttons</label>
             <label><input type="checkbox" checked={regenerateTokens} onChange={(e) => setRegenerateTokens(e.target.checked)} /> Regenerate magic-link tokens</label>
           </div>
         )}
-        {(action === 'accept' || action === 'pick') && <input value={rationale} onChange={(e) => setRationale(e.target.value)} placeholder="Rationale (optional)" maxLength={500} />}
+        {(action === 'accept' || action === 'pick') && <label><span className="sr-only">Rationale</span><input aria-label="Rationale (optional)" value={rationale} onChange={(e) => setRationale(e.target.value)} placeholder="Rationale (optional)" maxLength={500} /></label>}
       </div>
     </SlideOver>
   );

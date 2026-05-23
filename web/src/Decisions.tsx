@@ -64,8 +64,8 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [demo, filters]);
 
-  const ownerCounts = ownerBreakdown(payload.decisions);
-  const appOptions = appChoices(payload);
+  const ownerCounts = useMemo(() => ownerBreakdown(payload.decisions), [payload.decisions]);
+  const appOptions = useMemo(() => appChoices(payload), [payload]);
 
   return (
     <div className="decisions-page">
@@ -271,7 +271,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         {text(decision.reminded_at) && <span>reminded {ago(text(decision.reminded_at)) ?? 'recently'}</span>}
       </div>
       <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
-      <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</span>
+      <button className="ghost-btn decision-route" type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</button>
     </button>
   );
 }

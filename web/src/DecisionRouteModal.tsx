@@ -100,6 +100,15 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
     return () => { cancelled = true; };
   }, [open, appId, demo, issueId, rawBody, rawOptions, rawTitle, decision]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   async function sendNow() {
@@ -131,13 +140,13 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
   return (
     <div className="route-modal-root">
       <button className="route-modal-backdrop" onClick={onClose} aria-label="Close" />
-      <div className="route-modal-card">
+      <div className="route-modal-card" role="dialog" aria-modal="true" aria-label="Route to recipients">
         <div className="route-modal-head">
           <div>
             <div className="detail-eyebrow">Reviewing AI-rewritten decision email</div>
             <h2>Route to recipients</h2>
           </div>
-          <button className="slideover-close" onClick={onClose}>×</button>
+          <button className="slideover-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         {error && <div className="panel-error">{error}</div>}
         {status === 'loading' ? (

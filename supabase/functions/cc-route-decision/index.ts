@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, UUID_RE } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, UUID_RE, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-route-decision";
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
@@ -14,6 +14,9 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "noop");
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return json({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
   if (!MAGIC_SECRET) return json({ error: "CC_MAGIC_LINK_SECRET is not configured" }, 500, access.headerValue);
 
   let body: unknown;
@@ -68,6 +71,12 @@ Deno.serve(async (req) => {
       const recipientName = cleanString(recipient.contact_name, 160) ?? recipientEmail;
       const perSend = i === 0 ? baseSend : await cloneSend(baseSend);
       const perSendId = cleanString(perSend.id, 80)!;
+      if (i > 0) {
+        await cpPatch(
+          `cc_decision_email_sends?id=eq.${perSendId}&state=eq.rewrite_ready`,
+          { state: 'sent', sent_at: new Date().toISOString() },
+        );
+      }
       const storedOptions = approvedOptions.map((option) => ({ id: option.id, label: option.label }));
       const tokenized = await tokenizedOptions(storedOptions, perSendId);
       const messageId = `<cc-${perSendId}@blackrockai.co>`;

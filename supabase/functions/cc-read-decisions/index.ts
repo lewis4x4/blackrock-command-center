@@ -671,7 +671,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return buildJsonResponse({ error: "audit write failed", detail: msg }, 500, access.headerValue);
+    console.error(`[${FUNCTION_NAME}] audit write failed`, msg);
   }
 
   return buildJsonResponse(payload, 200, access.headerValue);

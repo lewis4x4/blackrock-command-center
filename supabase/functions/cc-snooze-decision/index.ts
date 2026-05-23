@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, json, rpc, verifyAccessJwt } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, json, rpc, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
 const READ_TOKEN = Deno.env.get("CC_READ_TOKEN") ?? "";
@@ -13,6 +13,9 @@ Deno.serve(async (req) => {
 
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return json({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
   if (!TOGGLE_TOKEN || TOGGLE_TOKEN === READ_TOKEN) return json({ error: "operator mutation auth misconfigured" }, 500, access.headerValue);
   if (req.headers.get("x-cc-auto-route-toggle") !== TOGGLE_TOKEN) return json({ error: "missing or invalid x-cc-auto-route-toggle" }, 401, access.headerValue);
 

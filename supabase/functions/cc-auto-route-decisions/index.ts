@@ -1,7 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-auto-route-decisions";
+const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
 const PUBLIC_BASE_URL = (Deno.env.get("CC_PUBLIC_DECISION_BASE_URL") ?? "https://blackrockai-command-center.netlify.app").replace(/\/+$/, "");
 const SENDER = "Brian Lewis <brian.lewis@blackrockai.co>";
@@ -13,6 +14,11 @@ Deno.serve(async (req) => {
 
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return json({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
+  if (!TOGGLE_TOKEN) return json({ error: "auto-route toggle token not configured" }, 500, access.headerValue);
+  if (req.headers.get("x-cc-auto-route-toggle") !== TOGGLE_TOKEN) return json({ error: "missing or invalid x-cc-auto-route-toggle" }, 401, access.headerValue);
   if (!MAGIC_SECRET) return json({ error: "CC_MAGIC_LINK_SECRET is not configured" }, 500, access.headerValue);
 
   const errors: Array<Record<string, unknown>> = [];
@@ -20,6 +26,7 @@ Deno.serve(async (req) => {
   let phaseB_enqueued = 0;
 
   const rewriteRows = await cpGet("cc_decision_email_sends?deleted_at=is.null&created_via=eq.auto_route&route_parent_send_id=is.null&state=eq.rewrite_ready&order=updated_at.asc&limit=10&select=id");
+  const claims: Array<{ sendId: string; claimToken: string; send: Record<string, unknown>; recipients: Record<string, unknown>[]; issueId: string; appId: string }> = [];
   for (const row of rewriteRows) {
     const sendId = cleanString((row as Record<string, unknown>)?.id, 80);
     if (!sendId || !UUID_RE.test(sendId)) continue;
@@ -29,12 +36,29 @@ Deno.serve(async (req) => {
       const claimToken = cleanString(claimed.claim_token, 80);
       const send = isRecord(claimed.send) ? claimed.send : null;
       const recipients = Array.isArray(claimed.recipients) ? claimed.recipients.filter(isRecord) : [];
-      if (!claimToken || !send || recipients.length === 0) throw new Error("claim returned no recipients");
+      const issueId = cleanString(send?.issue_id, 80);
+      const appId = cleanString(send?.app_id, 80);
+      if (!claimToken || !send || recipients.length === 0 || !issueId || !appId) throw new Error("claim returned no recipients");
+      claims.push({ sendId, claimToken, send, recipients, issueId, appId });
+    } catch (e) {
+      errors.push({ phase: "A-claim", send_id: sendId, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
-      const appId = cleanString(send.app_id, 80)!;
-      const issueId = cleanString(send.issue_id, 80)!;
-      const issueCheck = await cpGet(`cc_issues?id=eq.${issueId}&select=auto_route_paused_at,snoozed_until`);
-      const issue = issueCheck.find(isRecord);
+  const issueIds = claims.map((c) => c.issueId).filter((v, i, a) => a.indexOf(v) === i);
+  const issueMap = new Map<string, Record<string, unknown>>();
+  if (issueIds.length > 0) {
+    const issues = await cpGet(`cc_issues?id=in.(${issueIds.join(",")})&select=id,auto_route_paused_at,snoozed_until`);
+    for (const issue of issues.filter(isRecord)) {
+      const id = cleanString(issue.id, 80);
+      if (id) issueMap.set(id, issue);
+    }
+  }
+
+  for (const claim of claims) {
+    const { sendId, claimToken, send, recipients, issueId, appId } = claim;
+    try {
+      const issue = issueMap.get(issueId);
       const snoozedUntil = cleanString(issue?.snoozed_until, 80);
       if (cleanString(issue?.auto_route_paused_at, 80) || (snoozedUntil && new Date(snoozedUntil).getTime() > Date.now())) {
         await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&claim_token=eq.${claimToken}`, {
@@ -102,6 +126,10 @@ Deno.serve(async (req) => {
             recipient_id: recipientId,
             gmail_id: gmail.id,
           });
+          await cpPatch(
+            `cc_decision_email_sends?id=eq.${sendId}`,
+            { state: 'sent', sent_at: new Date().toISOString(), last_error: 'finalize drift — manual reconciliation needed' },
+          );
           throw new Error("post-send patch drifted after gmail send");
         }
 

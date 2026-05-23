@@ -6,6 +6,8 @@ import {
   type AppRow, type DecisionRecipient, type EditAppPayload, type RegisterAppPayload,
 } from './lib';
 
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export function AppsView({ apps, demo, onChanged }: { apps: AppRow[]; demo: boolean; onChanged: () => void | Promise<void> }) {
   const [editing, setEditing] = useState<AppRow | null>(null);
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -212,6 +214,7 @@ function DecisionRecipientsEditor({ app, demo, recipients, loading, onRecipients
     setBusy('save');
     onError('');
     try {
+      if (!EMAIL_RE.test(form.contact_email.trim())) throw new Error('contact_email must be a valid email address');
       if (editingId) {
         const updated = await editDecisionRecipient(editingId, form, demo);
         onRecipients(recipients.map((row) => row.id === editingId ? updated : row));
@@ -270,7 +273,7 @@ function DecisionRecipientsEditor({ app, demo, recipients, loading, onRecipients
           <label><span>Role</span><input value={form.contact_role} onChange={(ev) => setForm({ ...form, contact_role: ev.target.value })} placeholder="primary" /></label>
           <div className="apps-recipient-actions">
             <button className="ghost-btn" onClick={() => { setAdding(false); setEditingId(null); }} disabled={!!busy}>Cancel</button>
-            <button className="btn-primary panel-primary" onClick={() => void saveRecipient()} disabled={!!busy || !form.contact_name.trim() || !form.contact_email.trim()}>{busy === 'save' ? 'Saving…' : 'Save recipient'}</button>
+            <button className="btn-primary panel-primary" onClick={() => void saveRecipient()} disabled={!!busy || !form.contact_name.trim() || !form.contact_email.trim() || !EMAIL_RE.test(form.contact_email.trim())}>{busy === 'save' ? 'Saving…' : 'Save recipient'}</button>
           </div>
         </div>
       ) : (
@@ -333,12 +336,21 @@ function RegisterAppDrawer({ open, demo, onClose, onRegistered }: { open: boolea
   }
 
   const shortCode = created?.short_code ?? (form.short_code.trim().toUpperCase() || 'APP');
+  const canSubmit = [
+    form.short_code,
+    form.display_name,
+    form.project_ref,
+    form.project_url,
+    form.service_secret_ref,
+    form.readonly_secret_ref ?? '',
+    form.github_repo,
+  ].every((v) => v.trim().length > 0);
 
   return (
     <SlideOver open={open} title="Register new app" subtitle="Minimum registry payload only" onClose={close} footer={(
       <>
         <button className="ghost-btn" onClick={close} disabled={saving}>{created ? 'Done' : 'Cancel'}</button>
-        {!created && <button className="btn-primary panel-primary" onClick={() => void submit()} disabled={saving}>{saving ? 'Registering…' : 'Register app'}</button>}
+        {!created && <button className="btn-primary panel-primary" onClick={() => void submit()} disabled={saving || !canSubmit}>{saving ? 'Registering…' : 'Register app'}</button>}
       </>
     )}>
       {error && <div className="panel-error">{error}</div>}

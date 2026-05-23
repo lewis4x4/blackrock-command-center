@@ -6,6 +6,7 @@ export const ACCESS_REQUIRED = (Deno.env.get("CC_ACCESS_REQUIRED") ?? "false") =
 export const ACCESS_TEAM_DOMAIN = Deno.env.get("CC_ACCESS_TEAM_DOMAIN") ?? "";
 export const ACCESS_AUD = Deno.env.get("CC_ACCESS_AUD") ?? "";
 export const CC_READ_TOKEN = Deno.env.get("CC_READ_TOKEN") ?? "";
+export const CC_WRITE_TOKEN = Deno.env.get("CC_WRITE_TOKEN") ?? "";
 
 export const cpHeaders = {
   apikey: CP_KEY,
@@ -16,7 +17,7 @@ export const cpHeaders = {
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-csrf-token, x-cc-auto-route-toggle",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-csrf-token, x-cc-auto-route-toggle, x-cc-write-token",
 };
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -98,6 +99,14 @@ export async function verifyReadTokenHeader(presented: string | null): Promise<A
   if (!CC_READ_TOKEN) return { ok: false, status: 401, error: "read token not configured", headerValue: "noop", actor: "unknown" };
   if (!presented || presented !== CC_READ_TOKEN) return { ok: false, status: 401, error: "missing or invalid x-cc-read-token", headerValue: "noop", actor: "unknown" };
   return { ok: true, status: 200, headerValue: "noop", actor: `read-token:${await sha256Prefix(presented)}` };
+}
+
+export function verifyWriteToken(req: Request): { ok: boolean; status: number; error?: string } {
+  const token = req.headers.get("x-cc-write-token");
+  if (!CC_WRITE_TOKEN) return { ok: false, status: 500, error: "write token not configured" };
+  if (CC_WRITE_TOKEN === Deno.env.get("CC_READ_TOKEN")) return { ok: false, status: 500, error: "write token must differ from read token" };
+  if (!token || token !== CC_WRITE_TOKEN) return { ok: false, status: 401, error: "missing or invalid x-cc-write-token" };
+  return { ok: true, status: 200 };
 }
 
 export async function verifyAccessJwt(assertion: string | null): Promise<AccessResult> {

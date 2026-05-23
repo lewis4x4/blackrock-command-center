@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
     });
   } catch (e) {
     if (e instanceof RpcError) return withPublicCors(req, rpcErrorResponse(e));
-    return publicJson(req, { error: "decision confirm failed", detail: e instanceof Error ? e.message : String(e) }, 500);
+    return publicJson(req, { error: "decision confirm failed" }, 500);
   }
 });
 

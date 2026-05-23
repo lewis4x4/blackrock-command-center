@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, json, verifyAccessJwt } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, json, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-operator-reject-extraction";
 
@@ -8,6 +8,9 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "noop");
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return json({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
 
   let body: unknown;
   try { body = await req.json(); } catch { return json({ error: "body must be valid JSON" }, 400, access.headerValue); }

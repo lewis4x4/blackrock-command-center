@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, cleanString, cpGet, cpInsert, isRecord, json, randomToken, verifyAccessJwt, UUID_RE } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, cleanString, cpGet, cpInsert, isRecord, json, randomToken, verifyAccessJwt, UUID_RE, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-rewrite-decision";
 const TOKEN_PLACEHOLDER_PREFIX = "rewrite-placeholder:";
@@ -11,6 +11,9 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true });
   const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
   if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  const writeAuth = verifyWriteToken(req);
+  if (!writeAuth.ok) return json({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
 
   if (req.method === "GET") {
     const sendId = new URL(req.url).searchParams.get("send_id")?.trim() ?? "";
