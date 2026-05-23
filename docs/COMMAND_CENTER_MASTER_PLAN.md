@@ -22,6 +22,7 @@ It is long because Brian asked for the whole thing, fully specified. The order i
 8. **The risks** — the skeptic's pass, with mitigations folded into the plan.
 9. **The phased roadmap** — two parallel tracks, phases and exit criteria, no calendar estimates.
 10. **Decisions still needed from Brian.**
+11. **Amendment changelog** — dated architecture amendments to this plan.
 
 The **locked decisions** this plan is built on, confirmed by Brian: class-gated autonomy; Cloudflare Access as the deployment gate; the always-on Mac Studio as the runner host with Claude Code `/goal` primary and Cursor for cloud leaf work; an **interactive** per-app cockpit; **parallel** security and functionality tracks; and a **fully-specified** deliverable. None of these are reopened below.
 
@@ -105,6 +106,10 @@ The control plane has a registry, append-only audit log, and a live issue ledger
 
 The four nav pages — Decisions, Agents, Apps, Settings — are for **browsing and configuration**, not resolution. This division is the IA.
 
+### 2.4 Blockers
+
+A **Blocker** is a `cc_issues` row of type `blocked_item` and grain `'item'` — one per blocked task in a client app's roadmap. Each Blocker carries a `reason_kind` classifying *why* the work is stuck (awaiting a decision, missing input, behind a predecessor, blocked externally, awaiting a credential, or unclassified) and exits the queue through one of seven enumerated `resolution_action`s — link to a decision, supply input, compose a work order, raise an operator handoff, mark external, mark predecessor, or leave blocked. The free-text `blocker` string from the client snapshot is classification evidence, never an agent instruction. Blockers resolve through `cc_apply_blocker_resolution()` and write to the `cc_decision_answers` ledger with `answer_kind='blocker_input'` — the same ledger that records decision answers — keeping the resolution spine singular.
+
 ---
 
 ## 3. The autonomy model and the operator handoff
@@ -184,6 +189,13 @@ END $$;
 ALTER TABLE public.cc_issues
   ADD COLUMN IF NOT EXISTS grain public.cc_issue_grain NOT NULL DEFAULT 'aggregate';
 
+-- Symmetric item-grain rule for blockers: per-task rows of issue_type
+-- 'blocked_item' use source_ref = <client_task_id>, never 'aggregate'. They
+-- upsert against the same cc_issues_app_source_ref_active_idx pattern migration
+-- 032 uses for per-decision rows. The aggregate rows written by migration 009
+-- stay in place for the home count; item rows are the rows the blocker panel
+-- resolves.
+
 -- (b) Security Track / S1 close-out: revoke EVERY anonymous read. After this
 --     the browser holds no Supabase key at all and reads only through the
 --     Access-gated control-plane read API (§4.11). Apply part (b) ONLY once
@@ -254,6 +266,18 @@ CREATE POLICY cc_decision_answers_auth_all ON public.cc_decision_answers
 
 COMMIT;
 ```
+
+> **Production drift / migration 011a.** The schema above is canonical, but the shipped production migration 015 created `cc_decision_answers` without `answer_kind`. Repair it with an additive migration before blocker resolution writes to the ledger:
+>
+> ```sql
+> ALTER TABLE cc_decision_answers
+>   ADD COLUMN answer_kind text NOT NULL DEFAULT 'operator_decision'
+>   CHECK (answer_kind IN ('operator_decision','client_decision','blocker_input','sync_escalation'));
+> -- Existing rows backfill through the default. Once verified:
+> ALTER TABLE cc_decision_answers ALTER COLUMN answer_kind DROP DEFAULT;
+> ```
+>
+> This restores the seam through which Blocker resolutions write into the same ledger as Decision answers. Blockers are operator-resolved or operator-classified-then-dispatched; they never enter the client email engine.
 
 ### 4.3 Migration 012 — `agent_work_orders` (the queue)
 
@@ -567,7 +591,26 @@ The 4-arg signature in earlier drafts is superseded; `p_limit` is hard-coded ser
 
 `SECURITY DEFINER`; `REVOKE EXECUTE FROM PUBLIC`; `GRANT EXECUTE` only to the per-app scoped read role (§4.9). The client app owns exactly which columns each section exposes — the contract is the *shape*, not table access. Read-on-demand; the Aggregator never calls it, so the home stays cheap. Section payload shapes are specified per panel in §5.
 
+For `cc_export_detail('blockers')`, one item has this shape:
+
+```json
+{
+  "blocked_task_id": "T-042",
+  "title": "Wire OEM Vendor A price feed",
+  "stream": "C",
+  "wave": "1",
+  "blocker_text": "Waiting on Vendor A to confirm endpoint auth method",
+  "blocker_text_classified_as": "blocked_externally",
+  "age_days": 41,
+  "candidate_decision_ids": []
+}
+```
+
+`blocker_text_classified_as` is the server's `reason_kind`. The free-text `blocker_text` is displayed as evidence for Brian and for audit, but it is never assembled into `change_spec` and never read by an agent as an instruction.
+
 **`cc_apply_*()`** — the write siblings, also on each client app: `cc_apply_decision_answer()`, `cc_apply_task_state()`, `cc_apply_blocker_resolution()`. Each accepts only enumerated/typed arguments, never a repo or free text, and the client app owns exactly what they may mutate.
+
+`cc_apply_blocker_resolution(p_blocker_id uuid, p_resolution_action text, p_payload jsonb)` is `SECURITY DEFINER`, owned by `cc_contract_owner`, and grants `EXECUTE` only to `command_center`. `p_resolution_action` is exactly one of `link_decision | supply_input | create_work_order | create_manual_handoff | mark_external | mark_predecessor | leave_blocked`. `p_payload` is a discriminated schema owned by the server per action: `link_decision` carries a selected decision id; `supply_input` carries a typed value matching the field schema; `create_work_order` carries only typed input and selected templates needed to compose `agent_work_orders`; `create_manual_handoff` carries a handoff template id and typed handoff values; `mark_external` carries the external owner class and optional follow-up timestamp; `mark_predecessor` carries the predecessor task id; `leave_blocked` carries an enumerated reason code. It never accepts a free-text instruction. The return envelope is `{ blocker_id, prior_status, new_status, answer_id, work_order_id, handoff_id }`, with `work_order_id` and `handoff_id` nullable.
 
 **Two control-plane proxy edge functions:**
 
@@ -592,7 +635,7 @@ The Aggregator and the `cockpit-detail` proxy authenticate as `command_center` b
 
 ### 4.10 New `cc_audit_events` event types
 
-The write path adds: `decision_answered`, `decision_routed`, `decision_reply_received`, `work_order_created`, `work_order_authorized`, `agent_dispatched`, `agent_finished`, `agent_failed`, `agent_run_long`, `verification_passed`, `verification_failed`, `pr_ready`, `pr_merged`, `cost_ceiling_hit`, `runner_offline`, `handoff_created`, `handoff_done`, `detail_read`, `blocker_resolved`, `sync_retry`, `app_updated`. Every one has a plain-language "Lately" line (§5.9).
+The write path adds: `decision_answered`, `decision_routed`, `decision_reply_received`, `work_order_created`, `work_order_authorized`, `agent_dispatched`, `agent_finished`, `agent_failed`, `agent_run_long`, `verification_passed`, `verification_failed`, `pr_ready`, `pr_merged`, `cost_ceiling_hit`, `runner_offline`, `handoff_created`, `handoff_done`, `detail_read`, `blocker_resolved`, `blocker_classified`, `blocker_resolution_applied`, `blocker_linked_to_decision`, `blocker_marked_external`, `blocker_marked_predecessor`, `blocker_left_blocked`, `blocker_surfaced`, `blocker_cleared`, `sync_retry`, `app_updated`. `blocker_surfaced` and `blocker_cleared` are reconciler-written; the others are operator-action events. Every one has a plain-language "Lately" line (§5.9).
 
 ### 4.11 The browser read path — no database key in the browser
 
@@ -675,7 +718,22 @@ Observational with run-control. Body: why the build is not green (enumerated rea
 
 #### 5.2.4 Panel — Review Blockers (`blocked_item`)
 
-Body: blocked items **grouped by reason** — *awaiting a decision*, *missing input*, *behind another task*, *blocked externally*. A banner when any are decision-blocked: *"{K} of these clear the moment you answer the open decisions."* Missing-input cards offer a **typed/enumerated** `SupplyInputForm` (never a free-text instruction box); awaiting-decision cards offer **Link to a decision** and a jump straight to the Open Decisions panel. Supplying a value composes a work order; supplying a credential/asset is recorded as a manual resolution with no work order.
+Body: blocked items grouped by `reason_kind`, with the portfolio subtitle *"Most of these don't need much."* The panel shows the banner *"{K} of these clear the moment you answer the open decisions."* above the decision-linked group, where `K` is the count of Blockers whose current `resolution_action` can collapse through an answered decision. The earned-calm 0-state is: *"Nothing's blocked. Everything's moving."*
+
+The panel is a matrix, not prose. It shows five visible reason groups, backed by the six server `reason_kind` values from §2.4; `credential_or_access` is separate because it creates a downstream handoff instead of pretending a credential is ordinary text.
+
+| `reason_kind` | Enabled `resolution_action`s | Primary action copy |
+|---|---|---|
+| `awaiting_decision` | `link_decision`, `leave_blocked` | **Link to decision** |
+| `missing_input` | `supply_input`, `create_work_order`, `leave_blocked` | **Supply input** |
+| `behind_predecessor` | `mark_predecessor`, `leave_blocked` | **Mark predecessor** |
+| `blocked_externally` | `mark_external`, `link_decision`, `leave_blocked` | **Mark external** |
+| `credential_or_access` | `create_manual_handoff`, `supply_input`, `leave_blocked` | **Create handoff** |
+| `unclassified` | `leave_blocked` only until Brian categorizes it | **Categorize first** |
+
+`Link to decision` opens a picker over existing open decisions, not an input box. `Supply input` opens a typed/enumerated form whose schema comes from `cc_apply_blocker_resolution()` for that `reason_kind`. `Create work order` composes through the same answer-to-work-order path as decision answers, with `answer_kind='blocker_input'`. `Create handoff` creates a `cc_operator_handoffs` execution artifact downstream of this panel, not a new surface. `Mark external`, `mark_predecessor`, and `leave_blocked` keep the Blocker honest without pretending the Command Center can move work owned elsewhere.
+
+Invariant: **every blocker resolution is either an enumerated pick or a typed-value form whose schema is server-defined per `reason_kind`. There is no free-text resolution path. Ever.** The free-text `blocker` string remains classification evidence and row context only.
 
 #### 5.2.5 Panel — Check Sync (`sync_error`)
 
@@ -852,6 +910,10 @@ Each risk below is carried into the plan with a named mitigation; the roadmap (�
 
 **8.6 — The interactive cockpit as a sync hazard (HIGH).** Brian chose an interactive cockpit including task-state changes; the skeptic's caution is two writers to one truth (the cockpit and Linear) across a 5-minute snapshot lag. Mitigation: task-state writes go through `cockpit-writeback` → `cc_apply_task_state()` (the client app owns what may change), are always one-press-confirmed, write *to* the client data plane which Linear then mirrors (one direction of truth), show the change optimistically, and reconcile on the next snapshot. It is engineered as specified and flagged the highest-risk interactive feature; it lands in a later phase than the read cockpit so the pattern is proven on lower-risk writes first.
 
+Blocker resolution follows the same one-direction rule, with stricter input boundaries. Resolution is typed/enumerated only; the free-text `blocker` text is classification evidence and is never agent-readable. Optimistic UI is allowed, but it reconciles on the next snapshot; if that snapshot still shows the blocker present, the optimistic resolution is reverted and the row remains active. `unclassified` can never auto-compose a work order — the operator must categorize first. Linear is never written to from blocker resolution; the only write is to the client data plane via `cc_apply_blocker_resolution()`, and Linear catches up through the existing sync.
+
+The Review Blockers panel is the **intake/classification surface**. An operator handoff (`cc_operator_handoffs`) is the **execution artifact** for blockers whose `resolution_action='create_manual_handoff'`. They are not competing surfaces; the handoff is downstream of the blocker.
+
 **8.7 — Webhook spoofing (HIGH).** Mitigation: HMAC per-app secrets, timestamp + nonce replay defense, strict `app_id`-in-path binding, schema rejection of any identity/target field, every delivery logged to `cc_webhook_deliveries`.
 
 **8.8 — Notification overload (MEDIUM).** Mitigation: severity-gated and digested — CRITICAL pushes immediately, NEEDS-YOU batches into a digest, WATCH lives in-app only; quiet-hours suppression.
@@ -878,11 +940,15 @@ No calendar estimates. Two tracks run at once (Brian's locked decision): the **S
 
 **F1 — The board comes alive, honestly.** React-router; the mobile bottom tab bar; migration 010 (`cc_issues` grain). The triage band rebinds to `cc_issues` with the lifecycle chip and status-aware actions. The triage barometer. Per-app freshness (live/lagging/stale/silent). Activity → "Lately" with the copy deck. The **Apps** and **Settings** pages — fully real. Supabase Realtime on the snapshot and issue tables so the home updates itself with no manual refresh (webhook push-ingest from client apps is part of S3's webhook work — migration 015). *Exit:* the home is live and honest; two nav pages are real; "Lately" reads like a person wrote it.
 
-**F2 — See an issue, answer an issue.** The `cc_export_detail()` contract on QEP; the `cockpit-detail` proxy. Item-level `cc_issues` rows; the aggregate→item rollup rule. The four resolution slide-overs — answering recorded into `cc_decision_answers` (migration 011). The interactive per-app cockpit (read sections live; decision-answering live; the `cockpit-writeback` proxy + `cc_apply_*()` for retry-sync and supply-input). The **Decisions** page's real layer. *Exit:* every triage action opens a real resolution panel; "Open QEP" opens a full cockpit; decisions are answered in the Command Center.
+**F2 — See an issue, answer an issue.** The `cc_export_detail()` contract on QEP; the `cockpit-detail` proxy. Item-level `cc_issues` rows; the aggregate→item rollup rule. The four resolution slide-overs — answering recorded into `cc_decision_answers` (migration 011). The interactive per-app cockpit (read sections live; decision-answering live; the `cockpit-writeback` proxy + `cc_apply_*()` for retry-sync and supply-input). The **Decisions** page's real layer. F2-Blockers is a **parallel slice** inside F2, not a sequential prerequisite. F2 exit is reached when the F2 base (item-level decisions) AND F2-Blockers (item-level blockers, four non-runner resolution actions: `link_decision`, `mark_external`, `mark_predecessor`, `leave_blocked`) are both green. They can be built concurrently. *Exit:* every triage action opens a real resolution panel; "Open QEP" opens a full cockpit; decisions and non-runner blocker resolutions are answered in the Command Center.
 
-**F3 — The write spine.** Migrations 012–014 — `agent_work_orders`, `agent_runs`, `cc_operator_handoffs`. The runner daemon on the Mac Studio; the `/goal` adapter; the four-verb contract; criticality-ordered claiming; cost + wall-clock ceilings; the kill switch. The operator-handoff feature end to end. The **Agents** page, live. Telegram notifications, severity-gated. *Exit:* a work order can be handed to the queue, an agent builds it, a PR comes back, and Brian finds out on his phone — with an exact handoff for anything manual.
+**F3 — The write spine.** Migrations 012–014 — `agent_work_orders`, `agent_runs`, `cc_operator_handoffs`. The runner daemon on the Mac Studio; the `/goal` adapter; the four-verb contract; criticality-ordered claiming; cost + wall-clock ceilings; the kill switch. The operator-handoff feature end to end. The **Agents** page, live. Telegram notifications, severity-gated. F3-Blockers is a parallel slice inside F3: `supply_input` and `create_work_order` resolution actions compose `agent_work_orders` rows via the same path as decision answers, with `blocker_input` provenance, while `create_manual_handoff` creates the downstream `cc_operator_handoffs` artifact for credentials and manual steps. *Exit:* a work order can be handed to the queue, an agent builds it, a PR comes back, and Brian finds out on his phone — with an exact handoff for anything manual.
 
-**F4 — Close the loop.** Decision answered → work order → **class-gated dispatch** (AUTO auto-dispatches; AUTHORIZE one-press). The verification gate — advisory first (§3.2). The PR-triage band on the home; the Review-PR slide-over. The Cursor adapter; the routing policy live. The per-app WIP limit. Task-state change from the cockpit (the §8.6 feature, engineered as specified). *Exit:* the self-driving loop runs end to end; the verification gate is measured; the riskiest work still pauses for one press.
+**F4 — Close the loop.**
+
+**⚠️ DEFERRED — earned-autonomy and verification-gate machinery (F4) is deferred until QEP plus at least one additional live client are producing enough agent PR volume to justify the build.** The §8.10 risk that "the engine works mechanically but the verification gate is not trustworthy" is the most expensive way this project can fail, and the verification gate is the most expensive single block of work in this plan. Until the deferral lifts, F3 ships with **one-press dispatch only** — Brian one-press-authorizes every PR. The PR-triage band, agreement-rate measurement, and the AUTO-class dispatch path all wait. Re-evaluate when (i) two or more apps are live AND (ii) sustained PR volume from agents exceeds ~5/week.
+
+When the deferral lifts, F4 closes the loop: decision answered → work order → **class-gated dispatch** (AUTO auto-dispatches; AUTHORIZE one-press). The verification gate runs advisory first (§3.2). The PR-triage band on the home, the Review-PR slide-over, the Cursor adapter, the routing policy, the per-app WIP limit, and task-state change from the cockpit (the §8.6 feature, engineered as specified) land here. *Exit:* the self-driving loop runs end to end; the verification gate is measured; the riskiest work still pauses for one press.
 
 **F5 — Client decisions.** Migration 016 — `cc_decision_email_sends`. The branded decision email, Resend transport, the magic-link confirm page, inbound free-text reply → extraction → **Brian's confirm queue** (never auto-applied). The **Decisions** page, fully live. *Exit:* a client decision goes out clean, the owner answers, the answer lands structured and confirmed, the build unblocks.
 
@@ -890,7 +956,7 @@ No calendar estimates. Two tracks run at once (Brian's locked decision): the **S
 
 ### Sequencing rule
 
-S1 gates public deploy and nothing else. S2 is needed before F3's runner reads client repos at scale but does not block F1–F2. F2 depends on F1 (the router, the rebind). F3 depends on F2 (work orders are composed by answers). F4 depends on F3. The verification gate (F4) ships and runs *before* any work-class goes hands-off — that is the §3.2 discipline and it is non-negotiable.
+S1 gates public deploy and nothing else. S2 is needed before F3's runner reads client repos at scale but does not block F1–F2. F2 depends on F1 (the router, the rebind). F2-Blockers runs in parallel with the F2 base once the item-level pattern exists. F3 depends on F2 (work orders are composed by answers), and F3-Blockers rides the same write spine. F4 depends on F3 but is explicitly deferred until the §9 F4 volume gate is met. When the deferral lifts, the verification gate ships and runs *before* any work-class goes hands-off — that is the §3.2 discipline and it is non-negotiable.
 
 ---
 
@@ -907,4 +973,8 @@ Everything else in this document is specified and ready to build. On your word, 
 
 **End of master plan.**
 
+---
 
+## 11. Amendment changelog
+
+**2026-05-23 — Blocker amendment + F4 deferral.** Codified Blocker as a first-class architectural noun (§2.4) with `reason_kind` + `resolution_action` taxonomies. Pinned `cc_export_detail('blockers')` shape and `cc_apply_blocker_resolution()` signature (§4.8). Flagged production drift on `cc_decision_answers.answer_kind` (shipped mig 015) and specified migration 011a as the repair (§4.2). Added six audit event types (§4.10). Rewrote §5.2.4 panel spec from prose to a `reason_kind × resolution_action` matrix. Added blocker-specific sync hazard mitigations (§8.6). Named F2-Blockers and F3-Blockers as parallel slices in §9. Deferred F4 earned-autonomy / verification gate until PR volume justifies the build. No code shipped; this is a lexicon + contract + sequencing edit. Source reports: `docs/designs/BLOCKED_WORK_*` and `docs/designs/QEP_BLOCKED_WORK_*`; synthesis in `docs/BLOCKED_WORK_ROADMAP_DECISION.md`.
