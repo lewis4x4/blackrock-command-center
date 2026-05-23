@@ -201,7 +201,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     appsRows = await cpGet("v_command_center_home?select=*");
     const appCount = Math.max(1, appsRows.length);
     [appFlags, integrationRows, snapshotRows, issueRows] = await Promise.all([
-      cpGet("registry_apps?select=id,auto_route_decisions&deleted_at=is.null"),
+      cpGet("registry_apps?select=id,auto_route_decisions,onboarding_steps&deleted_at=is.null"),
       cpGet("registry_app_integrations?select=app_id,status"),
       cpGet(`registry_app_snapshots?select=app_id,captured_at,roadmap_counts&order=captured_at.desc&limit=${appCount * 2}`),
       cpGet("cc_issues?select=id,app_id,issue_type,source_ref,status,severity,title,summary,surfaced_at,last_seen_at,created_at,updated_at&resolved_at=is.null&deleted_at=is.null&status=not.in.(done,dismissed)&order=surfaced_at.desc"),
@@ -214,6 +214,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const integrationsByApp = buildIntegrations(integrationRows);
   const momentumByApp = buildMomentum(snapshotRows);
   const autoRouteByApp = new Map(appFlags.filter(isRecord).map((row) => [asString(row.id), row.auto_route_decisions === true]));
+  const onboardingStepsByApp = new Map(appFlags.filter(isRecord).map((row) => [asString(row.id), isRecord(row.onboarding_steps) ? row.onboarding_steps : {}]));
 
   const apps = appsRows.map((row) => {
     const rec = isRecord(row) ? row : {};
@@ -223,6 +224,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       integrations: integrationsByApp[appId] ?? {},
       momentum: momentumByApp[appId] ?? {},
       auto_route_decisions: autoRouteByApp.get(appId) === true,
+      onboarding_steps: onboardingStepsByApp.get(appId) ?? {},
     };
   });
 

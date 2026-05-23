@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
 import { ProjectGrid } from './Home';
 import {
-  addDecisionRecipient, ago, deleteDecisionRecipient, editAppBasics, editDecisionRecipient, loadDecisionRecipients, registerApp, setAutoRoute,
-  type AppRow, type DecisionRecipient, type EditAppPayload, type RegisterAppPayload,
+  addDecisionRecipient, ago, deleteDecisionRecipient, editAppBasics, editDecisionRecipient, loadDecisionRecipients, registerApp, setAppOnboardingStep, setAutoRoute,
+  type AppRow, type DecisionRecipient, type EditAppPayload, type OnboardingStepId, type RegisterAppPayload,
 } from './lib';
 
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -173,6 +173,7 @@ function EditAppDrawer({ app, demo, onClose, onSaved }: { app: AppRow; demo: boo
         <span>Criticality</span>
         <input type="number" min="0" max="1000" step="1" value={criticality} onChange={(ev) => setCriticality(ev.target.value)} />
       </label>
+      <OnboardingChecklist app={app} recipients={recipients} demo={demo} onError={setError} />
       <DecisionRecipientsEditor
         app={app}
         demo={demo}
@@ -182,6 +183,96 @@ function EditAppDrawer({ app, demo, onClose, onSaved }: { app: AppRow; demo: boo
         onError={setError}
       />
     </SlideOver>
+  );
+}
+
+const OWNER_KIND_PROMPT = `Update this app's \`cc_export_detail('decisions')\` RPC so each returned
+decision row includes an \`owner_kind\` field. This lets the BlackRock
+Command Center distinguish client-facing decisions from operator-only
+decisions.
+
+For each decision row, add \`owner_kind text\` to the returned shape with
+one of these values:
+- 'client' — the decision needs input from the CLIENT (their staff or
+  end customer). Examples: business policy questions, pricing rules,
+  customer treatment decisions.
+- 'operator' — Brian (BlackRock) decides alone. Examples: implementation
+  details, internal tooling defaults.
+- 'unknown' — when classification is ambiguous; defaults to operator.
+
+After the migration applies, the BlackRock Command Center will pick up
+the change automatically within ~5 minutes.`;
+
+function OnboardingChecklist({ app, recipients, demo, onError }: {
+  app: AppRow;
+  recipients: DecisionRecipient[];
+  demo: boolean;
+  onError: (message: string) => void;
+}) {
+  const [saving, setSaving] = useState<OnboardingStepId | ''>('');
+  const [copied, setCopied] = useState(false);
+  const [steps, setSteps] = useState(app.onboarding_steps ?? {});
+
+  useEffect(() => {
+    setSteps(app.onboarding_steps ?? {});
+  }, [app.id, app.onboarding_steps]);
+  const recipientsDone = recipients.filter((row) => row.active).length;
+  const manual4Done = steps.gmail_test_users_added?.done === true;
+  const manual5Done = steps.client_emits_owner_kind?.done === true;
+  const doneCount = 1 + (recipientsDone > 0 ? 1 : 0) + (app.auto_route_decisions === true ? 1 : 0) + (manual4Done ? 1 : 0) + (manual5Done ? 1 : 0);
+
+  const badgeClass = doneCount === 5 ? 'green' : doneCount <= 1 ? 'red' : 'amber';
+  const badgeText = doneCount === 5 ? 'Live' : `${doneCount}/5`;
+
+  async function toggle(stepId: OnboardingStepId, nextDone: boolean) {
+    setSaving(stepId);
+    onError('');
+    try {
+      const updated = await setAppOnboardingStep(app.id, stepId, nextDone, demo);
+      setSteps((current) => ({ ...current, ...updated.onboarding_steps }));
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving('');
+    }
+  }
+
+  async function copyPrompt() {
+    try {
+      await navigator.clipboard.writeText(OWNER_KIND_PROMPT);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      onError('Clipboard copy failed.');
+    }
+  }
+
+  return (
+    <div className="panel-section apps-onboarding-section">
+      <div className="apps-onboarding-head">
+        <div className="panel-label">Onboarding checklist</div>
+        <span className={`apps-onboarding-badge ${badgeClass}`}>{badgeText}</span>
+      </div>
+      <div className="panel-card apps-onboarding-list">
+        <div className="apps-onboarding-row done"><span>✓ 1. App registered</span></div>
+        <div className={`apps-onboarding-row ${recipientsDone > 0 ? 'done' : 'pending'}`}><span>{recipientsDone > 0 ? '✓' : '☐'} 2. Decision recipients added {recipientsDone > 0 ? `(${recipientsDone})` : ''}</span></div>
+        <div className={`apps-onboarding-row ${app.auto_route_decisions === true ? 'done' : 'pending'}`}><span>{app.auto_route_decisions === true ? '✓' : '☐'} 3. Auto-route enabled</span></div>
+        <div className={`apps-onboarding-row ${manual4Done ? 'done' : 'pending'}`}>
+          <span>{manual4Done ? '✓' : '☐'} 4. Gmail test users added</span>
+          <div className="apps-onboarding-actions">
+            <a className="linklike" href="https://console.cloud.google.com/auth/audience?project=tidal-orbit-487616-d7" target="_blank" rel="noreferrer">Open Cloud Console</a>
+            <button className="ghost-btn apps-onboarding-mark" onClick={() => void toggle('gmail_test_users_added', !manual4Done)} disabled={saving === 'gmail_test_users_added'}>{saving === 'gmail_test_users_added' ? 'Saving…' : (manual4Done ? 'Mark pending' : 'Mark done')}</button>
+          </div>
+        </div>
+        <div className={`apps-onboarding-row ${manual5Done ? 'done' : 'pending'}`}>
+          <span>{manual5Done ? '✓' : '☐'} 5. Client code emits owner_kind</span>
+          <div className="apps-onboarding-actions">
+            <button className="ghost-btn" onClick={() => void copyPrompt()}>{copied ? 'Copied' : 'Copy prompt'}</button>
+            <button className="ghost-btn apps-onboarding-mark" onClick={() => void toggle('client_emits_owner_kind', !manual5Done)} disabled={saving === 'client_emits_owner_kind'}>{saving === 'client_emits_owner_kind' ? 'Saving…' : (manual5Done ? 'Mark pending' : 'Mark done')}</button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -31,6 +31,9 @@ export interface SyncHealth {
 export interface Integrations { live?: number; demo?: number; manual_safe?: number; planned?: number; }
 export interface Momentum { shipped_delta?: number; }
 
+export type OnboardingStepId = 'gmail_test_users_added' | 'client_emits_owner_kind';
+export type OnboardingStepState = { done: boolean; at?: string; by?: string };
+
 export interface AppRow {
   id: string;
   short_code: string;
@@ -50,6 +53,7 @@ export interface AppRow {
   momentum: Momentum;
   sample?: boolean;
   auto_route_decisions?: boolean;
+  onboarding_steps?: Record<string, OnboardingStepState>;
 }
 
 export interface ActivityEvent {
@@ -340,6 +344,11 @@ export const DEMO_APPS: AppRow[] = [
     sync_health: { total_tasks: 174, mirrored_tasks: 171, error_count: 0, pending_count: 3, stale_pending_count: 0 },
     integrations: { live: 0, demo: 0, manual_safe: 0, planned: 7 },
     momentum: { shipped_delta: 3 },
+    auto_route_decisions: true,
+    onboarding_steps: {
+      gmail_test_users_added: { done: true, at: isoAgo(180), by: 'demo' },
+      client_emits_owner_kind: { done: true, at: isoAgo(120), by: 'demo' },
+    },
   },
   {
     id: 'scc', short_code: 'SCC', display_name: 'SCC', client_name: '—',
@@ -350,6 +359,11 @@ export const DEMO_APPS: AppRow[] = [
     sync_health: { total_tasks: 112, mirrored_tasks: 104, error_count: 2, pending_count: 6, stale_pending_count: 0 },
     integrations: { live: 1, demo: 0, manual_safe: 0, planned: 4 },
     momentum: { shipped_delta: 1 },
+    auto_route_decisions: true,
+    onboarding_steps: {
+      gmail_test_users_added: { done: false, at: isoAgo(90), by: 'demo' },
+      client_emits_owner_kind: { done: false, at: isoAgo(60), by: 'demo' },
+    },
   },
   {
     id: 'col', short_code: 'COL', display_name: 'Circle of Life', client_name: '—',
@@ -704,6 +718,20 @@ const ISSUE_STATUSES = new Set<IssueStatus>([
 ]);
 const ISSUE_SEVERITIES = new Set<IssueSeverity>(['critical', 'high', 'normal', 'low']);
 
+function parseOnboardingSteps(value: unknown): Record<string, OnboardingStepState> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, OnboardingStepState> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!isRecord(raw)) continue;
+    out[key] = {
+      done: raw.done === true,
+      at: asString(raw.at) ?? undefined,
+      by: asString(raw.by) ?? undefined,
+    };
+  }
+  return out;
+}
+
 function parseAppRow(value: unknown): AppRow {
   if (!isRecord(value)) throw new Error('cc-read-home payload contains an invalid app row');
   const id = asString(value.id);
@@ -733,6 +761,7 @@ function parseAppRow(value: unknown): AppRow {
     integrations: parseIntegrations(value.integrations),
     momentum: parseMomentum(value.momentum),
     auto_route_decisions: value.auto_route_decisions === true,
+    onboarding_steps: parseOnboardingSteps(value.onboarding_steps),
   };
 }
 
@@ -1462,6 +1491,28 @@ export async function setAutoRoute(appId: string, enabled: boolean, demo = false
   if (!res.ok) throw cleanError('cc-set-auto-route', res.status, payload);
   const result = asRecord(payload);
   return parseAppRow(result.app);
+}
+
+export async function setAppOnboardingStep(appId: string, stepId: OnboardingStepId, done: boolean, demo = false): Promise<{ app_id: string; onboarding_steps: Record<string, OnboardingStepState> }> {
+  if (demo) {
+    return {
+      app_id: appId,
+      onboarding_steps: { [stepId]: { done, at: new Date().toISOString(), by: 'demo' } },
+    };
+  }
+  const toggleToken = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_CC_AUTO_ROUTE_TOGGLE_TOKEN ?? '';
+  const res = await fetch(`${FUNCTIONS_URL}/cc-set-app-onboarding-step`, {
+    method: 'POST',
+    headers: { ...writeHeaders(), 'Content-Type': 'application/json', 'x-cc-auto-route-toggle': toggleToken },
+    body: JSON.stringify({ app_id: appId, step_id: stepId, done }),
+  });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError('cc-set-app-onboarding-step', res.status, payload);
+  const result = asRecord(payload);
+  return {
+    app_id: asString(result.app_id) ?? appId,
+    onboarding_steps: parseOnboardingSteps(result.onboarding_steps),
+  };
 }
 
 export async function editAppBasics(appId: string, changes: EditAppPayload, demo = false): Promise<AppRow> {
