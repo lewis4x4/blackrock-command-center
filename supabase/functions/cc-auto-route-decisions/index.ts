@@ -22,9 +22,80 @@ Deno.serve(async (req) => {
   if (!MAGIC_SECRET) return json({ error: "CC_MAGIC_LINK_SECRET is not configured" }, 500, access.headerValue);
 
   const errors: Array<Record<string, unknown>> = [];
+  let phase0_discovered = 0;
+  let phase0_claimed = 0;
+  const phase0_skipped: Array<{ decision_external_ref: string; reason: string }> = [];
   let phaseA_finalized = 0;
-  let phaseB_enqueued = 0;
 
+  // Phase 0 — Per-decision discovery (Slice 4)
+  try {
+    const decisionsResp = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/cc-read-decisions`, {
+      headers: { "x-cc-read-token": Deno.env.get("CC_READ_TOKEN") ?? "" },
+    });
+    if (decisionsResp.ok) {
+      const decisionsPayload = await decisionsResp.json();
+      const liveDecisions = Array.isArray(decisionsPayload?.decisions) ? decisionsPayload.decisions : [];
+      phase0_discovered = liveDecisions.length;
+
+      for (const decision of liveDecisions) {
+        const row = isRecord(decision) ? decision : null;
+        const appId = cleanString(row?.app_id, 80);
+        const refId = cleanString(row?.id, 200) ?? cleanString(row?.external_ref, 200) ?? cleanString(row?.decision_id, 200);
+        if (!appId || !refId) continue;
+
+        const title = cleanString(row?.title, 500)
+          ?? cleanString(row?.raw_title, 500)
+          ?? cleanString(row?.raw_decision_title, 500)
+          ?? "";
+        if (!title) continue;
+
+        const body = cleanString(row?.body, 5000)
+          ?? cleanString(row?.raw_body, 5000)
+          ?? cleanString(row?.raw_decision_body, 5000)
+          ?? cleanString(row?.summary, 5000);
+        const options = Array.isArray(row?.options)
+          ? row.options
+          : (Array.isArray(row?.answer_options)
+            ? row.answer_options
+            : (Array.isArray(row?.choices)
+              ? row.choices
+              : (Array.isArray(row?.allowed_answers) ? row.allowed_answers : [])));
+        const riskClass = cleanString(row?.risk_class, 40) ?? "";
+        const ownerKind = cleanString(row?.owner_kind, 40) ?? "";
+        const ownerRole = cleanString(row?.owner_role, 80) ?? "";
+
+        try {
+          const claimResult = await rpc<Record<string, unknown>>("cc_claim_auto_route_decision", {
+            p_app_id: appId,
+            p_decision_external_ref: refId,
+            p_raw_title: title,
+            p_raw_body: body,
+            p_options_snapshot: options,
+            p_risk_class: riskClass,
+            p_owner_kind: ownerKind,
+            p_owner_role: ownerRole,
+            p_actor: access.actor,
+          });
+
+          if (claimResult?.claimed === true) {
+            phase0_claimed += 1;
+          } else if (claimResult?.skipped) {
+            phase0_skipped.push({ decision_external_ref: refId, reason: String(claimResult.skipped) });
+          }
+        } catch (e) {
+          errors.push({ phase: "phase0", decision_external_ref: refId, error: e instanceof Error ? e.message : String(e) });
+        }
+
+        if (phase0_claimed >= 10) break;
+      }
+    } else {
+      errors.push({ phase: "phase0", error: `cc-read-decisions ${decisionsResp.status}` });
+    }
+  } catch (e) {
+    errors.push({ phase: "phase0", error: e instanceof Error ? e.message : String(e) });
+  }
+
+  // Phase A — Finalize pending rewrites
   const rewriteRows = await cpGet("cc_decision_email_sends?deleted_at=is.null&created_via=eq.auto_route&route_parent_send_id=is.null&state=eq.rewrite_ready&order=updated_at.asc&limit=10&select=id");
   const claims: Array<{ sendId: string; claimToken: string; send: Record<string, unknown>; recipients: Record<string, unknown>[]; issueId: string; appId: string }> = [];
   for (const row of rewriteRows) {
@@ -128,7 +199,7 @@ Deno.serve(async (req) => {
           });
           await cpPatch(
             `cc_decision_email_sends?id=eq.${sendId}`,
-            { state: 'sent', sent_at: new Date().toISOString(), last_error: 'finalize drift — manual reconciliation needed' },
+            { state: "sent", sent_at: new Date().toISOString(), last_error: "finalize drift — manual reconciliation needed" },
           );
           throw new Error("post-send patch drifted after gmail send");
         }
@@ -151,19 +222,14 @@ Deno.serve(async (req) => {
     }
   }
 
-  for (let i = 0; i < 10; i += 1) {
-    try {
-      const claimed = await rpc<Record<string, unknown> | null>("cc_claim_auto_route_candidate", { p_actor: access.actor });
-      if (!claimed || !cleanString(claimed.send_id, 80)) break;
-      phaseB_enqueued += 1;
-      await cpAudit(cleanString(claimed.app_id, 80), access.actor, "decision_auto_route_enqueued_function", { send_id: claimed.send_id, issue_id: claimed.issue_id });
-    } catch (e) {
-      errors.push({ phase: "B", error: e instanceof Error ? e.message : String(e) });
-      break;
-    }
-  }
-
-  return json({ phaseA_finalized, phaseB_enqueued, errors }, 200, access.headerValue);
+  return json({
+    phase0_discovered,
+    phase0_claimed,
+    phase0_skipped,
+    phaseA_finalized,
+    phaseB_enqueued: 0,
+    errors,
+  }, 200, access.headerValue);
 });
 
 type Option = { id: string; label: string };
