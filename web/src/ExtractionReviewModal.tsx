@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
-import type { PendingReviewSend } from './lib';
+import type { OperatorClarifyExtractionPayload, PendingReviewSend } from './lib';
 
 export function ExtractionReviewModal({
   review,
@@ -15,7 +15,7 @@ export function ExtractionReviewModal({
   onClose: () => void;
   onConfirm: (sendId: string, optionId: string, rationale?: string | null) => Promise<void>;
   onReject: (sendId: string, reason: string) => Promise<void>;
-  onClarify: (sendId: string, message: string) => Promise<void>;
+  onClarify: (payload: OperatorClarifyExtractionPayload) => Promise<void>;
 }) {
   const options = useMemo(() => review?.options_snapshot ?? [], [review]);
   const optionIds = useMemo(() => new Set(options.map((opt) => opt.id)), [options]);
@@ -25,7 +25,10 @@ export function ExtractionReviewModal({
   const [optionId, setOptionId] = useState(options[0]?.id ?? '');
   const [rationale, setRationale] = useState('');
   const [reason, setReason] = useState('');
-  const [clarify, setClarify] = useState(review?.llm_extraction?.suggested_clarification ?? '');
+  const [clarifySubject, setClarifySubject] = useState('');
+  const [clarifyBody, setClarifyBody] = useState(review?.llm_extraction?.suggested_clarification ?? '');
+  const [includeButtons, setIncludeButtons] = useState(true);
+  const [regenerateTokens, setRegenerateTokens] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -37,7 +40,10 @@ export function ExtractionReviewModal({
     setOptionId(canAccept ? currentSuggested! : (review.options_snapshot[0]?.id ?? ''));
     setReason('');
     setRationale('');
-    setClarify(review.llm_extraction?.suggested_clarification ?? '');
+    setClarifySubject(`Re: ${review.raw_decision_title}`);
+    setClarifyBody(review.llm_extraction?.suggested_clarification ?? '');
+    setIncludeButtons(review.llm_extraction?.requires_human === true || (review.llm_extraction?.confidence ?? 0) < 0.85);
+    setRegenerateTokens(false);
   }, [review?.send_id]);
 
   if (!review) return null;
@@ -48,8 +54,15 @@ export function ExtractionReviewModal({
     setBusy(true);
     try {
       if (action === 'reject') await onReject(current.send_id, reason);
-      else if (action === 'clarify') await onClarify(current.send_id, clarify);
-      else await onConfirm(current.send_id, action === 'accept' ? (current.llm_extraction?.matched_option_id ?? optionId) : optionId, rationale || null);
+      else if (action === 'clarify') {
+        await onClarify({
+          send_id: current.send_id,
+          subject: clarifySubject,
+          body: clarifyBody,
+          include_buttons: includeButtons,
+          regenerate_tokens: regenerateTokens,
+        });
+      } else await onConfirm(current.send_id, action === 'accept' ? (current.llm_extraction?.matched_option_id ?? optionId) : optionId, rationale || null);
       onClose();
     } finally {
       setBusy(false);
@@ -60,7 +73,7 @@ export function ExtractionReviewModal({
     <SlideOver open={open} title="Review extraction" subtitle={`${current.app_short_code} · reply from ${current.recipient_name ?? current.recipient_email}`} onClose={onClose} footer={(
       <>
         <button className="ghost-btn" onClick={onClose}>Close</button>
-        <button className="btn-primary panel-primary" onClick={() => void submit()} disabled={busy || (action === 'reject' && !reason.trim()) || (action === 'clarify' && !clarify.trim())}>
+        <button className="btn-primary panel-primary" onClick={() => void submit()} disabled={busy || (action === 'reject' && !reason.trim()) || (action === 'clarify' && (!clarifySubject.trim() || !clarifyBody.trim()))}>
           {busy ? 'Recording…' : action === 'clarify' ? 'Send clarification' : 'Confirm answer'}
         </button>
       </>
@@ -76,7 +89,14 @@ export function ExtractionReviewModal({
         <label><input type="radio" checked={action === 'reject'} onChange={() => setAction('reject')} /> Reject as off-topic</label>
         {action === 'reject' && <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason" maxLength={500} />}
         <label><input type="radio" checked={action === 'clarify'} onChange={() => setAction('clarify')} /> Send clarification</label>
-        {action === 'clarify' && <textarea value={clarify} onChange={(e) => setClarify(e.target.value)} rows={4} />}
+        {action === 'clarify' && (
+          <div className="panel-stack">
+            <input value={clarifySubject} onChange={(e) => setClarifySubject(e.target.value)} placeholder="Subject" maxLength={200} />
+            <textarea value={clarifyBody} onChange={(e) => setClarifyBody(e.target.value)} rows={8} />
+            <label><input type="checkbox" checked={includeButtons} onChange={(e) => setIncludeButtons(e.target.checked)} /> Include the three option buttons</label>
+            <label><input type="checkbox" checked={regenerateTokens} onChange={(e) => setRegenerateTokens(e.target.checked)} /> Regenerate magic-link tokens</label>
+          </div>
+        )}
         {(action === 'accept' || action === 'pick') && <input value={rationale} onChange={(e) => setRationale(e.target.value)} placeholder="Rationale (optional)" maxLength={500} />}
       </div>
     </SlideOver>

@@ -33,6 +33,19 @@ Deno.serve(async (req) => {
 
       const appId = cleanString(send.app_id, 80)!;
       const issueId = cleanString(send.issue_id, 80)!;
+      const issueCheck = await cpGet(`cc_issues?id=eq.${issueId}&select=auto_route_paused_at,snoozed_until`);
+      const issue = issueCheck.find(isRecord);
+      const snoozedUntil = cleanString(issue?.snoozed_until, 80);
+      if (cleanString(issue?.auto_route_paused_at, 80) || (snoozedUntil && new Date(snoozedUntil).getTime() > Date.now())) {
+        await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&claim_token=eq.${claimToken}`, {
+          claim_token: null,
+          lease_expires_at: null,
+          clarification_started_at: null,
+        });
+        await cpAudit(appId, access.actor, "decision_auto_route_aborted_pause_or_snooze", { send_id: sendId, issue_id: issueId });
+        continue;
+      }
+
       const subject = cleanString(send.rewritten_subject, 300) ?? cleanString(send.raw_decision_title, 300) ?? "Quick question";
       const body = cleanString(send.rewritten_body, 8000) ?? cleanString(send.raw_decision_body, 8000) ?? "Quick question before we proceed.";
       const options = normalizeOptions(send.options_snapshot);

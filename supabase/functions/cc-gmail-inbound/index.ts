@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
       const appId = cleanString(send.app_id, 80);
       const replyText = extractBody(msg);
       try {
-        const updated = await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(sent,delivered,opened,clicked,clarify_sent)`, {
+        const updated = await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(sent,delivered,opened,clicked,clarify_sent,reminded)`, {
           state: "replied",
           raw_reply_text: replyText,
           inbound_gmail_message_id: id,
@@ -148,7 +148,7 @@ async function findSend(ccSendId: string | null, inReplyTo: string | null, gmail
   }
   if (inReplyTo) {
     const encoded = encodeURIComponent(inReplyTo.split(/\s+/)[0] ?? inReplyTo);
-    const rows = await cpGet(`cc_decision_email_sends?or=(gmail_message_id.eq.${encoded},clarification_gmail_message_id.eq.${encoded})&deleted_at=is.null&select=*`);
+    const rows = await cpGet(`cc_decision_email_sends?or=(gmail_message_id.eq.${encoded},clarification_gmail_message_id.eq.${encoded},reminder_gmail_message_id.eq.${encoded})&deleted_at=is.null&select=*`);
     const row = rows.find(isRecord);
     if (row && senderMatches(row, from)) return row;
   }

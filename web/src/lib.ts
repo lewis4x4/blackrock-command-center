@@ -260,12 +260,23 @@ export interface SecretInventory {
   app_short_code: string | null;
   column: 'service_secret_ref' | 'readonly_secret_ref' | 'api_key_ref' | 'webhook_secret_ref' | 'vault';
 }
+export interface ExtractionThresholdMetrics {
+  window_start: string | null;
+  window_end: string | null;
+  auto_commits_14d: number;
+  reverts_14d: number;
+  revert_rate_14d: number;
+  current_threshold: number;
+  auto_tighten: 'disabled' | 'enabled';
+}
+
 export interface SettingsPayload {
   account: AccountInfo;
   aggregator: AggregatorSchedule;
   integrations: IntegrationsInventory;
   secrets: SecretInventory[];
   audit_preview: AuditEvent[];
+  extraction_metrics?: ExtractionThresholdMetrics;
   generated_at?: string;
 }
 
@@ -866,6 +877,15 @@ function parseSettingsPayload(value: unknown): SettingsPayload {
     integrations: parseIntegrationsInventory(value.integrations),
     secrets: value.secrets.map(parseSecretInventory).filter((secret) => secret.ref_name),
     audit_preview: Array.isArray(value.audit_preview) ? value.audit_preview.map(parseActivityEvent) : [],
+    extraction_metrics: isRecord(value.extraction_metrics) ? {
+      window_start: asString(value.extraction_metrics.window_start),
+      window_end: asString(value.extraction_metrics.window_end),
+      auto_commits_14d: asNumber(value.extraction_metrics.auto_commits_14d) ?? 0,
+      reverts_14d: asNumber(value.extraction_metrics.reverts_14d) ?? 0,
+      revert_rate_14d: asNumber(value.extraction_metrics.revert_rate_14d) ?? 0,
+      current_threshold: asNumber(value.extraction_metrics.current_threshold) ?? 1.01,
+      auto_tighten: asString(value.extraction_metrics.auto_tighten) === 'enabled' ? 'enabled' : 'disabled',
+    } : undefined,
     generated_at: asString(value.generated_at) ?? undefined,
   };
 }
@@ -1326,6 +1346,10 @@ export function latelyLine(ev: ActivityEvent): [sentence: string, show: boolean]
       const owner = detailString(d, 'owner_name') ?? firstNameFromActor(ev.actor);
       return [`${owner} replied to a decision on ${app} — it's waiting for you to confirm their answer.`, true];
     }
+    case 'decision_reminder_sent': {
+      const owner = detailString(d, 'owner_name') ?? firstNameFromActor(ev.actor);
+      return [`You sent a reminder on ${app} — still waiting on ${owner}.`, false];
+    }
     case 'work_order_created':
       return isAuthorizeWorkOrder(d)
         ? [`A build task for ${app} is ready — it needs your go-ahead.`, true]
@@ -1547,6 +1571,13 @@ export interface DecisionRow extends Record<string, unknown> {
   app_id: string;
   app_short_code: string;
   app_display_name: string;
+  auto_route_paused?: boolean;
+  auto_route_paused_at?: string | null;
+  auto_route_paused_by?: string | null;
+  auto_route_paused_reason?: string | null;
+  snoozed_until?: string | null;
+  snoozed_by?: string | null;
+  reminded_at?: string | null;
 }
 
 export interface DecisionsAppStatus {
@@ -1590,11 +1621,13 @@ export interface DecisionsPayload {
 export type DecisionOwnerFilter = 'all' | 'operator' | 'client' | 'unknown';
 export type DecisionAgeFilter = 'all' | '0-2' | '3-7' | '8+';
 export type DecisionSort = 'oldest' | 'newest';
+export type DecisionStateFilter = 'active' | 'paused' | 'all';
 export interface DecisionsFilters {
   app_id?: string;
   owner_kind?: DecisionOwnerFilter;
   age?: DecisionAgeFilter;
   sort?: DecisionSort;
+  state?: DecisionStateFilter;
 }
 
 const DEMO_PENDING_REVIEWS: PendingReviewSend[] = [
@@ -1665,7 +1698,19 @@ function parseDecisionRow(value: unknown): DecisionRow {
   const appShortCode = asString(value.app_short_code);
   const appDisplayName = asString(value.app_display_name);
   if (!appId || !appShortCode || !appDisplayName) throw new Error('cc-read-decisions decision row is missing app tags');
-  return { ...value, app_id: appId, app_short_code: appShortCode, app_display_name: appDisplayName };
+  return {
+    ...value,
+    app_id: appId,
+    app_short_code: appShortCode,
+    app_display_name: appDisplayName,
+    auto_route_paused: value.auto_route_paused === true,
+    auto_route_paused_at: asString(value.auto_route_paused_at),
+    auto_route_paused_by: asString(value.auto_route_paused_by),
+    auto_route_paused_reason: asString(value.auto_route_paused_reason),
+    snoozed_until: asString(value.snoozed_until),
+    snoozed_by: asString(value.snoozed_by),
+    reminded_at: asString(value.reminded_at),
+  };
 }
 
 function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
@@ -1796,6 +1841,10 @@ function filterDecisionRows(rows: DecisionRow[], filters: DecisionsFilters): Dec
   return rows.filter((row) => {
     if (filters.app_id && row.app_id !== filters.app_id) return false;
     if (filters.owner_kind && filters.owner_kind !== 'all' && decisionOwnerKind(row) !== filters.owner_kind) return false;
+    const isPaused = row.auto_route_paused === true;
+    const isSnoozed = !!row.snoozed_until && new Date(row.snoozed_until).getTime() > Date.now();
+    if ((filters.state ?? 'active') === 'active' && (isPaused || isSnoozed)) return false;
+    if ((filters.state ?? 'active') === 'paused' && !isPaused) return false;
     const age = decisionAgeDays(row);
     if (filters.age === '0-2' && (age == null || age > 2)) return false;
     if (filters.age === '3-7' && (age == null || age < 3 || age > 7)) return false;
@@ -1870,7 +1919,10 @@ export interface OperatorRejectExtractionPayload {
 
 export interface OperatorClarifyExtractionPayload {
   send_id: string;
-  message: string;
+  subject: string;
+  body: string;
+  include_buttons: boolean;
+  regenerate_tokens: boolean;
 }
 
 export async function confirmExtraction(send_id: string, option_id: string, rationale?: string | null, demo = false): Promise<unknown> {
@@ -1878,14 +1930,24 @@ export async function confirmExtraction(send_id: string, option_id: string, rati
   return postJson('cc-operator-confirm-extraction', { send_id, option_id, rationale });
 }
 
+export async function setDecisionPause(issue_id: string, paused: boolean, reason?: string | null, demo = false): Promise<unknown> {
+  if (demo) return { issue: { id: issue_id, auto_route_paused_at: paused ? new Date().toISOString() : null, auto_route_paused_reason: reason ?? null } };
+  return postJson('cc-pause-decision', { issue_id, action: paused ? 'pause' : 'resume', reason: reason ?? null });
+}
+
+export async function setDecisionSnooze(issue_id: string, days: 1 | 3 | 7 | null, demo = false): Promise<unknown> {
+  if (demo) return { issue: { id: issue_id, snoozed_until: days ? new Date(Date.now() + days * 86400000).toISOString() : null } };
+  return postJson('cc-snooze-decision', days ? { issue_id, action: 'snooze', days } : { issue_id, action: 'unsnooze' });
+}
+
 export async function rejectExtraction(send_id: string, reason: string, demo = false): Promise<unknown> {
   if (demo) return { send: { id: send_id, state: 'expired', last_error: reason } };
   return postJson('cc-operator-reject-extraction', { send_id, reason });
 }
 
-export async function operatorClarifyExtraction(send_id: string, message: string, demo = false): Promise<unknown> {
-  if (demo) return { send: { id: send_id, state: 'clarify_sent' } };
-  return postJson('cc-operator-clarify-extraction', { send_id, message });
+export async function operatorClarifyExtraction(payload: OperatorClarifyExtractionPayload, demo = false): Promise<unknown> {
+  if (demo) return { send: { id: payload.send_id, state: 'clarify_sent' } };
+  return postJson('cc-operator-clarify-extraction', payload);
 }
 
 function parseDecisionEmailSend(value: unknown): DecisionEmailSend {

@@ -82,6 +82,7 @@ export const SettingsView = forwardRef<SettingsViewHandle, { demo: boolean }>(fu
       {state === 'error' && <div className="detail-note error">Settings read failed: {error}</div>}
       <AccountBand payload={payload} loading={state === 'loading'} />
       <AggregatorBand schedule={payload.aggregator} loading={state === 'loading'} />
+      <ExtractionQualityBand payload={payload} loading={state === 'loading'} />
       <IntegrationsBand apps={payload.integrations.by_app} totals={payload.integrations.totals} loading={state === 'loading'} />
       <SecretsBand secrets={payload.secrets} loading={state === 'loading'} />
       <AuditBand audit={audit} loading={state === 'loading'} loadingMore={loadingMore} onLoadMore={loadMore} />
@@ -148,6 +149,22 @@ function AggregatorBand({ schedule, loading }: { schedule: AggregatorSchedule; l
           <InfoCard label="Jobname" value={schedule.jobname} />
           <InfoCard label="Last run" value={schedule.last_successful_at ? ago(schedule.last_successful_at) ?? 'just now' : '—'} dot={healthy ? 'green' : 'red'} />
           <InfoCard label="Next ETA" value={etaLabel(schedule.next_eta_at)} />
+        </div>
+      )}
+    </SettingsSection>
+  );
+}
+
+function ExtractionQualityBand({ payload, loading }: { payload: SettingsPayload; loading: boolean }) {
+  const m = payload.extraction_metrics;
+  return (
+    <SettingsSection num="2.5" title="Extraction quality" subtitle="14-day auto-commit vs revert rate window." count={m ? 1 : 0}>
+      {loading ? <SkeletonRows /> : !m ? <Empty title="No extraction metrics" copy="Metrics view not available yet." /> : (
+        <div className="settings-aggregator-grid">
+          <InfoCard label="Auto-commits (14d)" value={String(m.auto_commits_14d)} />
+          <InfoCard label="Reverts (14d)" value={String(m.reverts_14d)} />
+          <InfoCard label="Revert rate" value={`${(m.revert_rate_14d * 100).toFixed(2)}%`} />
+          <InfoCard label="Threshold" value={String(m.current_threshold)} />
         </div>
       )}
     </SettingsSection>

@@ -313,9 +313,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let auditPreviewRows: unknown[];
   let cronJob: Record<string, unknown> | null;
   let aggregatorTokenSet: boolean | null;
+  let extractionMetricsRows: unknown[];
 
   try {
-    [appsRows, supabaseRows, linearRows, integrationRows, latestSnapshotRows, auditPreviewRows, cronJob, aggregatorTokenSet] = await Promise.all([
+    [appsRows, supabaseRows, linearRows, integrationRows, latestSnapshotRows, auditPreviewRows, cronJob, aggregatorTokenSet, extractionMetricsRows] = await Promise.all([
       cpGet("registry_apps?select=id,short_code,display_name&deleted_at=is.null&order=short_code.asc"),
       cpGet("registry_app_supabase?select=app_id,service_secret_ref,readonly_secret_ref"),
       cpGet("registry_app_linear?select=app_id,api_key_ref,webhook_secret_ref"),
@@ -324,6 +325,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       cpGet("cc_audit_events?select=occurred_at,actor,event_type,detail,app_id,registry_apps(short_code,display_name)&event_type=not.in.(detail_read,agents_page_read,decisions_page_read,settings_page_read,secret_read)&order=occurred_at.desc&limit=10"),
       readCronJob(),
       readVaultSecretPresence("aggregator_token"),
+      cpGet("cc_extraction_threshold_metrics?select=*"),
     ]);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -347,6 +349,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     { ref_name: "aggregator_token", is_set: aggregatorTokenSet === true, app_short_code: null, column: "vault" as const },
   ].sort((a, b) => (a.app_short_code ?? "GLOBAL").localeCompare(b.app_short_code ?? "GLOBAL") || a.column.localeCompare(b.column));
 
+  const metricsRow = (extractionMetricsRows.find(isRecord) ?? {}) as Record<string, unknown>;
+
   const payload = {
     account: {
       auth_mode: access.authMode,
@@ -363,6 +367,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     integrations: buildIntegrations(integrationRows, appsById),
     secrets,
     audit_preview: auditPreviewRows.map(normalizeAudit),
+    extraction_metrics: {
+      window_start: asString(metricsRow.window_start),
+      window_end: asString(metricsRow.window_end),
+      auto_commits_14d: Number(metricsRow.auto_commits_14d ?? 0),
+      reverts_14d: Number(metricsRow.reverts_14d ?? 0),
+      revert_rate_14d: Number(metricsRow.revert_rate_14d ?? 0),
+      current_threshold: Number(metricsRow.current_threshold ?? 1.01),
+      auto_tighten: "disabled",
+    },
     generated_at: new Date().toISOString(),
   };
 

@@ -4,9 +4,9 @@ import { DecisionRouteModal } from './DecisionRouteModal';
 import { ExtractionReviewModal } from './ExtractionReviewModal';
 import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
-  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction,
+  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, setDecisionPause, setDecisionSnooze,
   type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus,
-  type DecisionsFilters, type DecisionsPayload, type DecisionSort, type PendingReviewSend,
+  type DecisionsFilters, type DecisionsPayload, type DecisionSort, type DecisionStateFilter, type OperatorClarifyExtractionPayload, type PendingReviewSend,
 } from './lib';
 
 export type DecisionsViewHandle = {
@@ -31,6 +31,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
   const [ownerKind, setOwnerKind] = useState<DecisionOwnerFilter>('all');
   const [age, setAge] = useState<DecisionAgeFilter>('all');
   const [sort, setSort] = useState<DecisionSort>('oldest');
+  const [stateFilter, setStateFilter] = useState<DecisionStateFilter>('active');
   const [openDecision, setOpenDecision] = useState<DecisionRow | null>(null);
   const [openReview, setOpenReview] = useState<PendingReviewSend | null>(null);
 
@@ -39,7 +40,8 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
     owner_kind: ownerKind,
     age,
     sort,
-  }), [appId, ownerKind, age, sort]);
+    state: stateFilter,
+  }), [appId, ownerKind, age, sort, stateFilter]);
 
   async function refresh() {
     setState('loading');
@@ -84,10 +86,12 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         ownerKind={ownerKind}
         age={age}
         sort={sort}
+        stateFilter={stateFilter}
         onAppId={setAppId}
         onOwnerKind={setOwnerKind}
         onAge={setAge}
         onSort={setSort}
+        onStateFilter={setStateFilter}
       />
       <DecisionsBand decisions={payload.decisions} loading={state === 'loading'} onOpen={setOpenDecision} />
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
@@ -99,7 +103,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onClose={() => setOpenReview(null)}
         onConfirm={async (sendId, optionId, rationale) => { await confirmExtraction(sendId, optionId, rationale, demo); await refresh(); }}
         onReject={async (sendId, reason) => { await rejectExtraction(sendId, reason, demo); await refresh(); }}
-        onClarify={async (sendId, message) => { await operatorClarifyExtraction(sendId, message, demo); await refresh(); }}
+        onClarify={async (payload: OperatorClarifyExtractionPayload) => { await operatorClarifyExtraction(payload, demo); await refresh(); }}
       />
     </div>
   );
@@ -162,16 +166,18 @@ function PendingReviewBand({ reviews, onOpen }: { reviews: PendingReviewSend[]; 
   );
 }
 
-function FilterBand({ appId, appOptions, ownerKind, age, sort, onAppId, onOwnerKind, onAge, onSort }: {
+function FilterBand({ appId, appOptions, ownerKind, age, sort, stateFilter, onAppId, onOwnerKind, onAge, onSort, onStateFilter }: {
   appId: string;
   appOptions: { id: string; code: string; name: string }[];
   ownerKind: DecisionOwnerFilter;
   age: DecisionAgeFilter;
   sort: DecisionSort;
+  stateFilter: DecisionStateFilter;
   onAppId: (value: string) => void;
   onOwnerKind: (value: DecisionOwnerFilter) => void;
   onAge: (value: DecisionAgeFilter) => void;
   onSort: (value: DecisionSort) => void;
+  onStateFilter: (value: DecisionStateFilter) => void;
 }) {
   return (
     <section className="band decisions-filter-band">
@@ -185,6 +191,7 @@ function FilterBand({ appId, appOptions, ownerKind, age, sort, onAppId, onOwnerK
         </label>
         <ChipGroup label="Owner" value={ownerKind} options={[['all', 'All'], ['operator', 'Operator'], ['client', 'Client'], ['unknown', 'Unknown']]} onChange={(value) => onOwnerKind(value as DecisionOwnerFilter)} />
         <ChipGroup label="Age" value={age} options={[['all', 'All'], ['0-2', '0–2d'], ['3-7', '3–7d'], ['8+', '8+d']]} onChange={(value) => onAge(value as DecisionAgeFilter)} />
+        <ChipGroup label="State" value={stateFilter} options={[['active', 'Active'], ['paused', 'Paused'], ['all', 'All']]} onChange={(value) => onStateFilter(value as DecisionStateFilter)} />
         <button className="ghost-btn decisions-sort" onClick={() => onSort(sort === 'oldest' ? 'newest' : 'oldest')}>
           {sort === 'oldest' ? 'Oldest first' : 'Newest first'}
         </button>
@@ -261,6 +268,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         <span>{ageLabel(decision)}</span>
         <span>{text(decision.status) ?? 'open'}</span>
         {emailState && <span className={'decision-state-badge ' + emailState}>{emailState === 'awaiting_operator_confirm' ? 'needs review' : emailState.replace(/_/g, ' ')}</span>}
+        {text(decision.reminded_at) && <span>reminded {ago(text(decision.reminded_at)) ?? 'recently'}</span>}
       </div>
       <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
       <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</span>
@@ -322,15 +330,43 @@ function DecisionDrawer({ decision, demo, onClose, onAnswered }: { decision: Dec
   const rows = useMemo(() => [decision], [decision]);
   const flow = useDecisionAnswerFlow({ rows, demo, issueIdForRow: decisionRowIssueId });
   const [routingRow, setRoutingRow] = useState<Record<string, unknown> | null>(null);
+  const [mutating, setMutating] = useState(false);
 
   async function closeAfterMaybeRefresh() {
     if (flow.completed) await onAnswered();
     onClose();
   }
 
+  const issueId = decisionRowIssueId(decision);
+  const paused = decision.auto_route_paused === true || !!decision.auto_route_paused_at;
+
+  async function togglePause(nextPaused: boolean) {
+    if (!issueId || mutating) return;
+    setMutating(true);
+    try {
+      await setDecisionPause(issueId, nextPaused, null, demo);
+      await onAnswered();
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function snooze(days: 1 | 3 | 7 | null) {
+    if (!issueId || mutating) return;
+    setMutating(true);
+    try {
+      await setDecisionSnooze(issueId, days, demo);
+      await onAnswered();
+    } finally {
+      setMutating(false);
+    }
+  }
+
   return (
     <SlideOver open title="Decision detail" subtitle={`${decision.app_short_code} · ${ownerLabel(decisionRowOwnerKind(decision))} owned`} onClose={() => void closeAfterMaybeRefresh()} footer={(
       <>
+        {issueId && <button className="ghost-btn" onClick={() => void togglePause(!paused)} disabled={mutating}>{paused ? 'Resume auto-route' : 'Pause auto-route'}</button>}
+        {issueId && <button className="ghost-btn" onClick={() => void snooze(decision.snoozed_until ? null : 1)} disabled={mutating}>{decision.snoozed_until ? 'Unsnooze' : 'Snooze 1d'}</button>}
         <button className="ghost-btn" onClick={() => void closeAfterMaybeRefresh()}>{flow.completed ? 'Done' : 'Close'}</button>
         {!flow.completed && flow.operatorRows.length > 0 && (
           <button className="btn-primary panel-primary" onClick={() => void flow.submitAnswer()} disabled={!flow.canSubmit}>
@@ -402,6 +438,9 @@ function decisionOptions(row: Record<string, unknown>): { id: string; label: str
 }
 
 function decisionEmailState(row: Record<string, unknown>): string | null {
+  if (row.auto_route_paused === true || text(row.auto_route_paused_at)) return 'paused';
+  const snoozedUntil = text(row.snoozed_until);
+  if (snoozedUntil && new Date(snoozedUntil).getTime() > Date.now()) return 'snoozed';
   const direct = text(row.decision_email_state) ?? text(row.email_state) ?? text(row.routing_state);
   const status = text(row.status)?.toLowerCase();
   const raw = (direct ?? (status === 'routed_to_client' ? 'routed' : status === 'answered' ? 'answered' : null))?.toLowerCase();

@@ -323,6 +323,14 @@ function decisionAgeDays(row: Record<string, unknown>): number | null {
   return null;
 }
 
+function issueDecisionRef(issueRow: Record<string, unknown>): string | null {
+  const detail = isRecord(issueRow.detail) ? issueRow.detail : null;
+  return asString(detail?.decision_external_ref)
+    ?? asString(detail?.external_ref)
+    ?? asString(detail?.decision_id)
+    ?? null;
+}
+
 function applyFilters(rows: Record<string, unknown>[], ownerFilter: string | null, maxAgeDays: number | null): Record<string, unknown>[] {
   return rows.filter((row) => {
     if (ownerFilter && ownerKind(row) !== ownerFilter) return false;
@@ -430,6 +438,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let answeredSendRows: unknown[];
   let pendingReviews: unknown[];
   let aggregateIssueByApp: Map<string, string> = new Map();
+  let aggregateIssueById = new Map<string, Record<string, unknown>>();
+  let aggregateIssueByDecisionRef = new Map<string, Record<string, unknown>>();
   try {
     const appPath = appId
       ? `registry_apps?id=eq.${appId}&deleted_at=is.null&status=eq.active&select=id,short_code,display_name&limit=1`
@@ -438,18 +448,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews, rawAnsweredSendRows] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews, rawAnsweredSendRows, rawReminderRows] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
       cpGet("cc_decision_answers?select=id,issue_id,app_id,decision_external_ref,answer_value,answer_options_snapshot,rationale,risk_class,answered_by,answered_at,dispatched_at,registry_apps(short_code,display_name)&deleted_at=is.null&order=answered_at.desc&limit=20"),
       appIdFilter
-        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&source_ref=eq.aggregate&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,created_at&order=created_at.desc`)
+        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&source_ref=eq.aggregate&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,created_at,detail,auto_route_paused_at,auto_route_paused_by,auto_route_paused_reason,snoozed_until,snoozed_by&order=created_at.desc`)
         : Promise.resolve([]),
       appId
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
       cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
+      appIdFilter
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,reminded)&select=issue_id,reminded_at&order=updated_at.desc`)
+        : Promise.resolve([]),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
@@ -457,12 +470,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
     pendingReviews = rawPendingReviews;
     // Map: app_id -> most recent aggregate open_decision cc_issues.id
     aggregateIssueByApp = new Map();
+    aggregateIssueByDecisionRef = new Map();
     for (const row of rawAggregateIssues.filter(isRecord)) {
       const appIdValue = asString(row.app_id);
       const issueIdValue = asString(row.id);
       if (!appIdValue || !issueIdValue) continue;
       if (!aggregateIssueByApp.has(appIdValue)) {
         aggregateIssueByApp.set(appIdValue, issueIdValue); // most-recent (ordered DESC)
+      }
+      aggregateIssueById.set(issueIdValue, row);
+      const refValue = issueDecisionRef(row);
+      if (refValue && !aggregateIssueByDecisionRef.has(`${appIdValue}::${refValue}`)) {
+        aggregateIssueByDecisionRef.set(`${appIdValue}::${refValue}`, row);
+      }
+    }
+
+    for (const row of rawReminderRows.filter(isRecord)) {
+      const issueIdValue = asString(row.issue_id);
+      if (!issueIdValue) continue;
+      const existing = aggregateIssueById.get(issueIdValue) ?? {};
+      if (!isRecord(existing) || !asString(existing.reminded_at)) {
+        aggregateIssueById.set(issueIdValue, { ...existing, reminded_at: asString(row.reminded_at) });
       }
     }
   } catch (e) {
@@ -483,8 +511,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .filter((result): result is Extract<FanoutResult, { kind: "unreachable" }> => result.kind === "unreachable")
     .map((result) => appStatus(result.app, { reason: result.reason, status: result.status, detail: result.detail }));
 
-  const allDecisions = fanout.flatMap((result) => result.kind === "reached" ? result.decisions : []);
-
+  const allDecisions = fanout.flatMap((result) => result.kind === "reached" ? result.decisions : []).map((decision) => {
+    const appIdValue = asString(decision.app_id);
+    const decisionRef = asString(decision.id)
+      ?? asString(decision.external_ref)
+      ?? asString(decision.decision_id);
+    const issueId = asString(decision.cc_issue_id);
+    const issueMeta = (appIdValue && decisionRef ? aggregateIssueByDecisionRef.get(`${appIdValue}::${decisionRef}`) : null)
+      ?? (issueId ? aggregateIssueById.get(issueId) : null)
+      ?? (appIdValue ? aggregateIssueById.get(aggregateIssueByApp.get(appIdValue) ?? "") : null);
+    if (!issueMeta) return decision;
+    return {
+      ...decision,
+      auto_route_paused_at: asString(issueMeta.auto_route_paused_at),
+      auto_route_paused_by: asString(issueMeta.auto_route_paused_by),
+      auto_route_paused_reason: asString(issueMeta.auto_route_paused_reason),
+      auto_route_paused: !!asString(issueMeta.auto_route_paused_at),
+      snoozed_until: asString(issueMeta.snoozed_until),
+      snoozed_by: asString(issueMeta.snoozed_by),
+      reminded_at: asString(issueMeta.reminded_at),
+    };
+  });
   // Build the set of (app_id, decision_external_ref) pairs that already have
   // an answer in cc_decision_answers. We use this to suppress decisions that
   // the app keeps re-emitting from cc_export_detail('decisions') after we've
@@ -505,16 +552,32 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
   }
 
+  const nowTs = Date.now();
   const filteredDecisions = allDecisions.filter((decision) => {
     const appIdValue = asString((decision as Record<string, unknown>).app_id);
     const refValue = asString((decision as Record<string, unknown>).id)
       ?? asString((decision as Record<string, unknown>).external_ref)
       ?? asString((decision as Record<string, unknown>).decision_id);
     if (appIdValue && refValue && answeredKeys.has(`${appIdValue}::${refValue}`)) return false;
+    const snoozedUntil = asString((decision as Record<string, unknown>).snoozed_until);
+    if (snoozedUntil) {
+      const ts = Date.parse(snoozedUntil);
+      if (!Number.isNaN(ts) && ts > nowTs) return false;
+    }
     return true;
   });
 
   const decisions = applyFilters(filteredDecisions, ownerFilter, maxAgeDays).slice(0, limit);
+  const snoozed = applyFilters(
+    allDecisions.filter((decision) => {
+      const snoozedUntil = asString((decision as Record<string, unknown>).snoozed_until);
+      if (!snoozedUntil) return false;
+      const ts = Date.parse(snoozedUntil);
+      return !Number.isNaN(ts) && ts > nowTs;
+    }),
+    ownerFilter,
+    maxAgeDays,
+  ).slice(0, limit);
 
   const appById = new Map(apps.map((app) => [app.app_id, app]));
   const createdViaByAnswerId = new Map(
@@ -566,6 +629,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         created_via: id ? (createdViaByAnswerId.get(id) ?? 'manual') : 'manual',
       };
     }),
+    snoozed,
     pending_reviews: pendingReviews.filter(isRecord).map((row) => {
       const app = appById.get(asString(row.app_id) ?? "");
       return {
