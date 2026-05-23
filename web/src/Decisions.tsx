@@ -6,7 +6,7 @@ import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
   ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, setDecisionPause, setDecisionSnooze,
   type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus,
-  type DecisionsFilters, type DecisionsPayload, type DecisionSort, type DecisionStateFilter, type OperatorClarifyExtractionPayload, type PendingReviewSend,
+  type DecisionsFilters, type DecisionsPayload, type DecisionSort, type DecisionStateFilter, type OperatorClarifyExtractionPayload, type PendingReviewSend, type RoutedDecisionSummary,
 } from './lib';
 
 export type DecisionsViewHandle = {
@@ -20,6 +20,7 @@ const emptyDecisions: DecisionsPayload = {
   apps_unreachable: [],
   apps_unwired: [],
   decisions: [],
+  routed_recent: [],
   answered_recent: [],
 };
 
@@ -94,6 +95,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onStateFilter={setStateFilter}
       />
       <DecisionsBand decisions={payload.decisions} loading={state === 'loading'} onOpen={setOpenDecision} />
+      <RoutedBand rows={payload.routed_recent ?? []} loading={state === 'loading'} />
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
       <AnsweredBand rows={payload.answered_recent} loading={state === 'loading'} />
       {openDecision && <DecisionDrawer decision={openDecision} demo={demo} onClose={() => setOpenDecision(null)} onAnswered={refresh} />}
@@ -286,11 +288,47 @@ function WiringNotes({ unwired, unreachable }: { unwired: DecisionsAppStatus[]; 
   );
 }
 
-function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; loading: boolean }) {
+function RoutedBand({ rows, loading }: { rows: RoutedDecisionSummary[]; loading: boolean }) {
+  if (!loading && rows.length === 0) return null;
   return (
     <section className="band agents-section">
       <div className="band-head">
         <span className="band-num">2</span>
+        <div>
+          <div className="band-title">Awaiting reply</div>
+          <div className="band-sub">Decisions already routed to recipients, hidden from the open list.</div>
+        </div>
+        <span className="count-chip">{rows.length}</span>
+      </div>
+      {loading ? <SkeletonCards /> : (
+        <div className="answered-list">
+          {rows.map((row) => (
+            <div className="answered-row" key={row.send_id}>
+              <div className="agents-app">
+                <span className="badge" style={{ background: colorFor(row.app_short_code ?? 'APP') }}>{(row.app_short_code ?? 'A')[0]}</span>
+                <div>
+                  <b>{row.app_display_name ?? row.app_short_code ?? 'App'}</b>
+                  <span>{row.app_short_code ?? '—'}</span>
+                </div>
+              </div>
+              <div className="answered-main">
+                <b>{row.decision_title ?? row.decision_external_ref}</b>
+                <span>{routedStateLabel(row.state)}{row.recipient_count > 1 ? ` · ${row.recipient_count} recipients` : row.recipient_name ? ` · ${row.recipient_name}` : ''}</span>
+              </div>
+              <div className="answered-age">{ago(row.reminded_at ?? row.sent_at ?? row.updated_at) ?? '—'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; loading: boolean }) {
+  return (
+    <section className="band agents-section">
+      <div className="band-head">
+        <span className="band-num">3</span>
         <div>
           <div className="band-title">Recently answered</div>
           <div className="band-sub">Latest operator answers recorded in the control plane ledger.</div>
@@ -423,6 +461,12 @@ function appChoices(payload: DecisionsPayload): { id: string; code: string; name
     map.set(decision.app_id, { id: decision.app_id, code: decision.app_short_code, name: decision.app_display_name });
   }
   return [...map.values()].sort((a, b) => a.code.localeCompare(b.code));
+}
+
+function routedStateLabel(state: string): string {
+  if (state === 'reminded') return 'Reminder sent';
+  if (state === 'awaiting_clarify' || state === 'clarify_sent') return 'Clarification sent';
+  return 'Routed to recipient';
 }
 
 function decisionOptions(row: Record<string, unknown>): { id: string; label: string }[] {

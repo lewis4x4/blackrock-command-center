@@ -1802,11 +1802,29 @@ export interface AnsweredDecisionSummary extends Record<string, unknown> {
   created_via?: 'manual' | 'auto_route';
 }
 
+export interface RoutedDecisionSummary extends Record<string, unknown> {
+  send_id: string;
+  issue_id: string | null;
+  app_id: string;
+  app_short_code: string | null;
+  app_display_name: string | null;
+  decision_external_ref: string;
+  decision_title: string | null;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  recipient_count: number;
+  state: DecisionEmailState;
+  sent_at: string | null;
+  reminded_at: string | null;
+  updated_at: string | null;
+}
+
 export interface DecisionsPayload {
   apps_reached: DecisionsAppStatus[];
   apps_unreachable: DecisionsAppStatus[];
   apps_unwired: DecisionsAppStatus[];
   decisions: DecisionRow[];
+  routed_recent?: RoutedDecisionSummary[];
   answered_recent: AnsweredDecisionSummary[];
   pending_reviews?: PendingReviewSend[];
   generated_at?: string;
@@ -1870,6 +1888,7 @@ const emptyDecisionsPayload: DecisionsPayload = {
   apps_unreachable: [],
   apps_unwired: [],
   decisions: [],
+  routed_recent: [],
   answered_recent: [],
   pending_reviews: [],
 };
@@ -1940,6 +1959,34 @@ function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
   };
 }
 
+function parseRoutedDecisionSummary(value: unknown): RoutedDecisionSummary {
+  if (!isRecord(value)) throw new Error('cc-read-decisions payload contains an invalid routed decision row');
+  const sendId = asString(value.send_id);
+  const appId = asString(value.app_id);
+  const decisionExternalRef = asString(value.decision_external_ref);
+  const state = asString(value.state);
+  if (!sendId || !appId || !decisionExternalRef || !state) {
+    throw new Error('cc-read-decisions routed row is missing required fields');
+  }
+  return {
+    ...value,
+    send_id: sendId,
+    issue_id: asString(value.issue_id),
+    app_id: appId,
+    app_short_code: asString(value.app_short_code),
+    app_display_name: asString(value.app_display_name),
+    decision_external_ref: decisionExternalRef,
+    decision_title: asString(value.decision_title),
+    recipient_name: asString(value.recipient_name),
+    recipient_email: asString(value.recipient_email),
+    recipient_count: asNumber(value.recipient_count) ?? 1,
+    state: state as DecisionEmailState,
+    sent_at: asString(value.sent_at),
+    reminded_at: asString(value.reminded_at),
+    updated_at: asString(value.updated_at),
+  };
+}
+
 function parseDecisionExtractionLLM(value: unknown): DecisionExtractionLLM | null {
   const rec = asRecord(value);
   if (!Object.keys(rec).length) return null;
@@ -1985,6 +2032,7 @@ function parseDecisionsPayload(value: unknown): DecisionsPayload {
     apps_unreachable: Array.isArray(value.apps_unreachable) ? value.apps_unreachable.map(parseDecisionsAppStatus) : [],
     apps_unwired: Array.isArray(value.apps_unwired) ? value.apps_unwired.map(parseDecisionsAppStatus) : [],
     decisions: value.decisions.map(parseDecisionRow),
+    routed_recent: Array.isArray(value.routed_recent) ? value.routed_recent.map(parseRoutedDecisionSummary) : [],
     answered_recent: value.answered_recent.map(parseAnsweredDecisionSummary),
     pending_reviews: Array.isArray(value.pending_reviews) ? value.pending_reviews.map(parsePendingReviewSend) : [],
     generated_at: asString(value.generated_at) ?? undefined,

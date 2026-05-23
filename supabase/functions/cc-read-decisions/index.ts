@@ -395,6 +395,63 @@ function answeredSummary(row: unknown): Record<string, unknown> {
   };
 }
 
+type RoutedAccumulator = {
+  summary: Record<string, unknown>;
+  updatedMs: number;
+  recipientEmails: Set<string>;
+};
+
+function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>): Record<string, unknown>[] {
+  const awaitingReplyStates = new Set(["sent", "delivered", "opened", "clicked", "reminded", "awaiting_clarify", "clarify_sent"]);
+  const byDecision = new Map<string, RoutedAccumulator>();
+
+  for (const row of rows.filter(isRecord)) {
+    const appId = asString(row.app_id);
+    const ref = asString(row.decision_external_ref);
+    const state = asString(row.state);
+    if (!appId || !ref || !state || !awaitingReplyStates.has(state)) continue;
+
+    const key = `${appId}::${ref}`;
+    const updatedAt = asString(row.updated_at) ?? asString(row.sent_at);
+    const updatedMs = updatedAt ? Date.parse(updatedAt) : 0;
+    const recipientEmail = asString(row.recipient_email);
+    const existing = byDecision.get(key);
+    const recipientEmails = existing?.recipientEmails ?? new Set<string>();
+    if (recipientEmail) recipientEmails.add(recipientEmail);
+
+    if (existing && updatedMs <= existing.updatedMs) {
+      existing.summary.recipient_count = recipientEmails.size;
+      continue;
+    }
+
+    const app = appById.get(appId);
+    byDecision.set(key, {
+      updatedMs,
+      recipientEmails,
+      summary: {
+        send_id: asString(row.id),
+        issue_id: asString(row.issue_id),
+        app_id: appId,
+        app_short_code: app?.app_short_code ?? null,
+        app_display_name: app?.app_display_name ?? null,
+        decision_external_ref: ref,
+        decision_title: asString(row.raw_decision_title),
+        recipient_name: asString(row.recipient_name),
+        recipient_email: recipientEmail,
+        recipient_count: recipientEmails.size,
+        state,
+        sent_at: asString(row.sent_at),
+        reminded_at: asString(row.reminded_at),
+        updated_at: updatedAt,
+      },
+    });
+  }
+
+  return [...byDecision.values()]
+    .sort((a, b) => b.updatedMs - a.updatedMs)
+    .map((item) => ({ ...item.summary, recipient_count: item.recipientEmails.size }));
+}
+
 Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { status: 200, headers: corsHeaders });
@@ -436,10 +493,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let dpRows: DataPlaneRecord[];
   let answeredRecent: unknown[];
   let answeredSendRows: unknown[];
+  let routedSendRows: unknown[];
   let pendingReviews: unknown[];
   let aggregateIssueByApp: Map<string, string> = new Map();
-  let aggregateIssueById = new Map<string, Record<string, unknown>>();
-  let aggregateIssueByDecisionRef = new Map<string, Record<string, unknown>>();
+  let issueById = new Map<string, Record<string, unknown>>();
+  let issueByDecisionRef = new Map<string, Record<string, unknown>>();
   try {
     const appPath = appId
       ? `registry_apps?id=eq.${appId}&deleted_at=is.null&status=eq.active&select=id,short_code,display_name&limit=1`
@@ -448,49 +506,53 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews, rawAnsweredSendRows, rawReminderRows] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawIssueRows, rawPendingReviews, rawAnsweredSendRows, rawRoutedSendRows] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
       cpGet("cc_decision_answers?select=id,issue_id,app_id,decision_external_ref,answer_value,answer_options_snapshot,rationale,risk_class,answered_by,answered_at,dispatched_at,registry_apps(short_code,display_name)&deleted_at=is.null&order=answered_at.desc&limit=20"),
       appIdFilter
-        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&source_ref=eq.aggregate&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,created_at,detail,auto_route_paused_at,auto_route_paused_by,auto_route_paused_reason,snoozed_until,snoozed_by&order=created_at.desc`)
+        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,source_ref,status,created_at,detail,auto_route_paused_at,auto_route_paused_by,auto_route_paused_reason,snoozed_until,snoozed_by&order=created_at.desc`)
         : Promise.resolve([]),
       appId
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
       cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
       appIdFilter
-        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,reminded)&select=issue_id,reminded_at&order=updated_at.desc`)
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title&order=updated_at.desc`)
         : Promise.resolve([]),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
     answeredSendRows = rawAnsweredSendRows;
+    routedSendRows = rawRoutedSendRows;
     pendingReviews = rawPendingReviews;
-    // Map: app_id -> most recent aggregate open_decision cc_issues.id
+    // Map: app_id -> most recent aggregate open_decision cc_issues.id, plus
+    // per-decision issue rows keyed by their app-local decision ref. Routed
+    // decisions can keep showing up in the app export until the app ingests the
+    // answer, so the control-plane lifecycle must win over the federated row.
     aggregateIssueByApp = new Map();
-    aggregateIssueByDecisionRef = new Map();
-    for (const row of rawAggregateIssues.filter(isRecord)) {
+    issueByDecisionRef = new Map();
+    for (const row of rawIssueRows.filter(isRecord)) {
       const appIdValue = asString(row.app_id);
       const issueIdValue = asString(row.id);
       if (!appIdValue || !issueIdValue) continue;
-      if (!aggregateIssueByApp.has(appIdValue)) {
-        aggregateIssueByApp.set(appIdValue, issueIdValue); // most-recent (ordered DESC)
+      issueById.set(issueIdValue, row);
+      if (asString(row.source_ref) === "aggregate" && !aggregateIssueByApp.has(appIdValue)) {
+        aggregateIssueByApp.set(appIdValue, issueIdValue); // most-recent aggregate marker (ordered DESC)
       }
-      aggregateIssueById.set(issueIdValue, row);
       const refValue = issueDecisionRef(row);
-      if (refValue && !aggregateIssueByDecisionRef.has(`${appIdValue}::${refValue}`)) {
-        aggregateIssueByDecisionRef.set(`${appIdValue}::${refValue}`, row);
+      if (refValue && !issueByDecisionRef.has(`${appIdValue}::${refValue}`)) {
+        issueByDecisionRef.set(`${appIdValue}::${refValue}`, row);
       }
     }
 
-    for (const row of rawReminderRows.filter(isRecord)) {
+    for (const row of routedSendRows.filter(isRecord)) {
       const issueIdValue = asString(row.issue_id);
       if (!issueIdValue) continue;
-      const existing = aggregateIssueById.get(issueIdValue) ?? {};
+      const existing = issueById.get(issueIdValue) ?? {};
       if (!isRecord(existing) || !asString(existing.reminded_at)) {
-        aggregateIssueById.set(issueIdValue, { ...existing, reminded_at: asString(row.reminded_at) });
+        issueById.set(issueIdValue, { ...existing, reminded_at: asString(row.reminded_at) });
       }
     }
   } catch (e) {
@@ -516,13 +578,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const decisionRef = asString(decision.id)
       ?? asString(decision.external_ref)
       ?? asString(decision.decision_id);
-    const issueId = asString(decision.cc_issue_id);
-    const issueMeta = (appIdValue && decisionRef ? aggregateIssueByDecisionRef.get(`${appIdValue}::${decisionRef}`) : null)
-      ?? (issueId ? aggregateIssueById.get(issueId) : null)
-      ?? (appIdValue ? aggregateIssueById.get(aggregateIssueByApp.get(appIdValue) ?? "") : null);
+    const issueId = asString(decision.cc_issue_id) ?? asString(decision.issue_id);
+    const decisionIssue = appIdValue && decisionRef ? issueByDecisionRef.get(`${appIdValue}::${decisionRef}`) : null;
+    const explicitIssue = issueId ? issueById.get(issueId) : null;
+    const aggregateIssue = appIdValue ? issueById.get(aggregateIssueByApp.get(appIdValue) ?? "") : null;
+    const issueMeta = decisionIssue ?? explicitIssue ?? aggregateIssue;
     if (!issueMeta) return decision;
+    const sourceRef = asString(issueMeta.source_ref);
+    const issueScope = decisionIssue || (explicitIssue && sourceRef !== "aggregate") ? "decision" : "aggregate";
     return {
       ...decision,
+      cc_issue_id: asString(issueMeta.id) ?? asString(decision.cc_issue_id),
+      cc_issue_status: asString(issueMeta.status),
+      cc_issue_status_scope: issueScope,
       auto_route_paused_at: asString(issueMeta.auto_route_paused_at),
       auto_route_paused_by: asString(issueMeta.auto_route_paused_by),
       auto_route_paused_reason: asString(issueMeta.auto_route_paused_reason),
@@ -538,27 +606,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // already routed + answered them. The app may not yet have ingested the
   // answer; the operator should not have to keep seeing answered work.
   const answeredKeys = new Set<string>();
+  const routedKeys = new Set<string>();
   for (const row of answeredRecent.filter(isRecord)) {
     const appIdValue = asString(row.app_id);
     const refValue = asString(row.decision_external_ref);
     if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
   }
 
-  // Also include decisions whose send row is currently in any sent/pending
-  // routing state — operator already handled it; don't re-list.
   for (const row of answeredSendRows.filter(isRecord)) {
     const appIdValue = asString(row.app_id);
     const refValue = asString(row.decision_external_ref);
     if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
   }
 
+  // Active routed email sends are the canonical "awaiting client" marker.
+  // The source app may continue emitting the same decision as open until it
+  // ingests a reply, but the cockpit must not show it as operator-routable.
+  for (const row of routedSendRows.filter(isRecord)) {
+    const appIdValue = asString(row.app_id);
+    const refValue = asString(row.decision_external_ref);
+    if (appIdValue && refValue) routedKeys.add(`${appIdValue}::${refValue}`);
+  }
+
+  const openIssueStatuses = new Set(["surfaced", "triaging", "gated"]);
   const nowTs = Date.now();
   const filteredDecisions = allDecisions.filter((decision) => {
     const appIdValue = asString((decision as Record<string, unknown>).app_id);
     const refValue = asString((decision as Record<string, unknown>).id)
       ?? asString((decision as Record<string, unknown>).external_ref)
       ?? asString((decision as Record<string, unknown>).decision_id);
-    if (appIdValue && refValue && answeredKeys.has(`${appIdValue}::${refValue}`)) return false;
+    if (appIdValue && refValue && (answeredKeys.has(`${appIdValue}::${refValue}`) || routedKeys.has(`${appIdValue}::${refValue}`))) return false;
+    const issueStatus = asString((decision as Record<string, unknown>).cc_issue_status);
+    const issueScope = asString((decision as Record<string, unknown>).cc_issue_status_scope);
+    if (issueScope === "decision" && issueStatus && !openIssueStatuses.has(issueStatus)) return false;
     const snoozedUntil = asString((decision as Record<string, unknown>).snoozed_until);
     if (snoozedUntil) {
       const ts = Date.parse(snoozedUntil);
@@ -580,6 +660,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   ).slice(0, limit);
 
   const appById = new Map(apps.map((app) => [app.app_id, app]));
+  const routedRecent = routedSummaries(routedSendRows, appById).slice(0, 20);
   const createdViaByAnswerId = new Map(
     answeredSendRows.filter(isRecord)
       .map((row) => [asString(row.decision_answer_id), asString(row.created_via)])
@@ -604,6 +685,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps_unreachable: appsUnreachable,
     apps_unwired: appsUnwired,
     decisions,
+    routed_recent: routedRecent,
     answered_recent: answeredRecent.map((row) => {
       const summary = answeredSummary(row);
       const id = asString(summary.id);
