@@ -449,7 +449,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       appId
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
-      cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via"),
+      cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
@@ -484,7 +484,37 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .map((result) => appStatus(result.app, { reason: result.reason, status: result.status, detail: result.detail }));
 
   const allDecisions = fanout.flatMap((result) => result.kind === "reached" ? result.decisions : []);
-  const decisions = applyFilters(allDecisions, ownerFilter, maxAgeDays).slice(0, limit);
+
+  // Build the set of (app_id, decision_external_ref) pairs that already have
+  // an answer in cc_decision_answers. We use this to suppress decisions that
+  // the app keeps re-emitting from cc_export_detail('decisions') after we've
+  // already routed + answered them. The app may not yet have ingested the
+  // answer; the operator should not have to keep seeing answered work.
+  const answeredKeys = new Set<string>();
+  for (const row of answeredRecent.filter(isRecord)) {
+    const appIdValue = asString(row.app_id);
+    const refValue = asString(row.decision_external_ref);
+    if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
+  }
+
+  // Also include decisions whose send row is currently in any sent/pending
+  // routing state — operator already handled it; don't re-list.
+  for (const row of answeredSendRows.filter(isRecord)) {
+    const appIdValue = asString(row.app_id);
+    const refValue = asString(row.decision_external_ref);
+    if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
+  }
+
+  const filteredDecisions = allDecisions.filter((decision) => {
+    const appIdValue = asString((decision as Record<string, unknown>).app_id);
+    const refValue = asString((decision as Record<string, unknown>).id)
+      ?? asString((decision as Record<string, unknown>).external_ref)
+      ?? asString((decision as Record<string, unknown>).decision_id);
+    if (appIdValue && refValue && answeredKeys.has(`${appIdValue}::${refValue}`)) return false;
+    return true;
+  });
+
+  const decisions = applyFilters(filteredDecisions, ownerFilter, maxAgeDays).slice(0, limit);
 
   const appById = new Map(apps.map((app) => [app.app_id, app]));
   const createdViaByAnswerId = new Map(
@@ -492,6 +522,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .map((row) => [asString(row.decision_answer_id), asString(row.created_via)])
       .filter(([id, via]) => !!id && !!via) as Array<[string, string]>
   );
+  // Title (+ option label) lookup for the Recently answered band — so the
+  // cockpit shows "Rebate stacking — answered: case_by_case" instead of the
+  // raw decision_external_ref UUID.
+  const titleByAnswerId = new Map<string, string>();
+  const optionsByAnswerId = new Map<string, unknown[]>();
+  for (const row of answeredSendRows.filter(isRecord)) {
+    const id = asString(row.decision_answer_id);
+    if (!id) continue;
+    const title = asString(row.raw_decision_title);
+    if (title && !titleByAnswerId.has(id)) titleByAnswerId.set(id, title);
+    if (Array.isArray(row.options_snapshot) && !optionsByAnswerId.has(id)) {
+      optionsByAnswerId.set(id, row.options_snapshot);
+    }
+  }
   const payload = {
     apps_reached: appsReached,
     apps_unreachable: appsUnreachable,
@@ -500,7 +544,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
     answered_recent: answeredRecent.map((row) => {
       const summary = answeredSummary(row);
       const id = asString(summary.id);
-      return { ...summary, created_via: id ? (createdViaByAnswerId.get(id) ?? 'manual') : 'manual' };
+      const decisionTitle = id ? (titleByAnswerId.get(id) ?? null) : null;
+      const answerValue = asString(summary.answer_value);
+      const opts = id ? optionsByAnswerId.get(id) : undefined;
+      let answerLabel: string | null = null;
+      if (answerValue && Array.isArray(opts)) {
+        for (const opt of opts) {
+          if (!opt || typeof opt !== 'object') continue;
+          const optRec = opt as Record<string, unknown>;
+          const optId = asString(optRec.id) ?? asString(optRec.value) ?? asString(optRec.key);
+          if (optId === answerValue) {
+            answerLabel = asString(optRec.label) ?? asString(optRec.name) ?? asString(optRec.title) ?? answerValue;
+            break;
+          }
+        }
+      }
+      return {
+        ...summary,
+        decision_title: decisionTitle,
+        answer_label: answerLabel ?? answerValue ?? null,
+        created_via: id ? (createdViaByAnswerId.get(id) ?? 'manual') : 'manual',
+      };
     }),
     pending_reviews: pendingReviews.filter(isRecord).map((row) => {
       const app = appById.get(asString(row.app_id) ?? "");

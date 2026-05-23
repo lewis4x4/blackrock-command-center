@@ -1565,7 +1565,9 @@ export interface AnsweredDecisionSummary extends Record<string, unknown> {
   app_short_code: string | null;
   app_display_name: string | null;
   decision_external_ref: string | null;
+  decision_title: string | null;
   answer_value: string;
+  answer_label: string | null;
   answer_options_snapshot: unknown;
   rationale: string | null;
   risk_class: RiskClass;
@@ -1686,7 +1688,9 @@ function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
     app_short_code: asString(value.app_short_code),
     app_display_name: asString(value.app_display_name),
     decision_external_ref: asString(value.decision_external_ref),
+    decision_title: asString(value.decision_title),
     answer_value: answerValue,
+    answer_label: asString(value.answer_label),
     answer_options_snapshot: value.answer_options_snapshot,
     rationale: asString(value.rationale),
     risk_class: riskClass,
