@@ -35,6 +35,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
   const [stateFilter, setStateFilter] = useState<DecisionStateFilter>('active');
   const [openDecision, setOpenDecision] = useState<DecisionRow | null>(null);
   const [openReview, setOpenReview] = useState<PendingReviewSend | null>(null);
+  const [lastOpenCount, setLastOpenCount] = useState(0);
 
   const filters: DecisionsFilters = useMemo(() => ({
     app_id: appId || undefined,
@@ -50,10 +51,10 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
     try {
       const next = await loadDecisions(filters, demo);
       setPayload(next);
+      setLastOpenCount(next.decisions.length);
       setState('ready');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setPayload(emptyDecisions);
       setState('error');
     }
   }
@@ -73,13 +74,12 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
       <DecisionsHeader
         loading={state === 'loading'}
         generatedAt={payload.generated_at}
-        openCount={payload.decisions.length}
+        openCount={state === 'error' ? lastOpenCount : payload.decisions.length}
         operatorCount={ownerCounts.operator}
         clientCount={ownerCounts.client}
         unknownCount={ownerCounts.unknown}
         onRefresh={refresh}
       />
-      {state === 'error' && <div className="detail-note error">Decisions read failed: {error}</div>}
       <PendingReviewBand reviews={payload.pending_reviews ?? []} onOpen={setOpenReview} />
       <FilterBand
         appId={appId}
@@ -94,7 +94,13 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onSort={setSort}
         onStateFilter={setStateFilter}
       />
-      <DecisionsBand decisions={payload.decisions} loading={state === 'loading'} onOpen={setOpenDecision} />
+      <DecisionsBand
+        decisions={payload.decisions}
+        loading={state === 'loading'}
+        error={state === 'error' ? error : ''}
+        onRetry={refresh}
+        onOpen={setOpenDecision}
+      />
       <RoutedBand rows={payload.routed_recent ?? []} loading={state === 'loading'} />
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
       <AnsweredBand rows={payload.answered_recent} loading={state === 'loading'} />
@@ -220,7 +226,13 @@ function ChipGroup({ label, value, options, onChange }: {
   );
 }
 
-function DecisionsBand({ decisions, loading, onOpen }: { decisions: DecisionRow[]; loading: boolean; onOpen: (decision: DecisionRow) => void }) {
+function DecisionsBand({ decisions, loading, error, onRetry, onOpen }: {
+  decisions: DecisionRow[];
+  loading: boolean;
+  error: string;
+  onRetry: () => void | Promise<void>;
+  onOpen: (decision: DecisionRow) => void;
+}) {
   return (
     <section className="band agents-section decisions-list-band">
       <div className="band-head">
@@ -232,7 +244,13 @@ function DecisionsBand({ decisions, loading, onOpen }: { decisions: DecisionRow[
         <span className="count-chip">{decisions.length}</span>
       </div>
       <div className="decisions-section-body">
-        {loading ? <SkeletonCards /> : decisions.length === 0 ? (
+        {loading ? <SkeletonCards /> : error ? (
+          <div className="detail-placeholder agents-empty">
+            <b>Couldn't load decisions.</b>
+            <span>{error}</span>
+            <button className="ghost-btn" onClick={() => void onRetry()}>Retry</button>
+          </div>
+        ) : decisions.length === 0 ? (
           <div className="detail-placeholder agents-empty">
             <b>No open decisions</b>
             <span>Every registered app is unblocked right now.</span>
@@ -249,7 +267,6 @@ function DecisionsBand({ decisions, loading, onOpen }: { decisions: DecisionRow[
 
 function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (decision: DecisionRow) => void }) {
   const owner = decisionRowOwnerKind(decision);
-  const risk = riskClass(decision);
   const options = decisionOptions(decision);
   const emailState = decisionEmailState(decision);
   return (
@@ -262,18 +279,16 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
             <span>{decision.app_short_code}</span>
           </div>
         </div>
-        <span className={'risk-chip ' + risk}>{risk}</span>
+        <span className={'risk-chip ' + ageTone(decision)}>{ageLabel(decision)}</span>
       </div>
       <div className="decision-title">{decisionRowTitle(decision)}</div>
       <div className="decision-meta">
-        <span>{ownerLabel(owner)} owned</span>
-        <span>{ageLabel(decision)}</span>
-        <span>{text(decision.status) ?? 'open'}</span>
-        {emailState && <span className={'decision-state-badge ' + emailState}>{emailState === 'awaiting_operator_confirm' ? 'needs review' : emailState.replace(/_/g, ' ')}</span>}
+        <span>{ownerLabel(owner)}</span>
+        {emailState && <span className={'decision-state-badge ' + stateBadgeTone(emailState)}>{stateLabel(emailState)}</span>}
         {text(decision.reminded_at) && <span>reminded {ago(text(decision.reminded_at)) ?? 'recently'}</span>}
       </div>
-      <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
-      <button className="ghost-btn decision-route" type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</button>
+      <div className="decision-options">{decisionOptionsCopy(owner, emailState, options, decision)}</div>
+      <button className="btn-primary decision-route" style={{ width: '100%', minHeight: 44 }} type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>{decisionCta(emailState)}</button>
     </button>
   );
 }
@@ -496,11 +511,6 @@ function decisionEmailState(row: Record<string, unknown>): string | null {
   return null;
 }
 
-function riskClass(row: Record<string, unknown>): string {
-  const risk = text(row.risk_class)?.toLowerCase();
-  return ['auto', 'authorize', 'destructive', 'production'].includes(risk ?? '') ? risk! : 'authorize';
-}
-
 function ownerLabel(owner: 'operator' | 'client' | 'unknown'): string {
   if (owner === 'operator') return 'Operator';
   if (owner === 'client') return 'Client';
@@ -508,12 +518,59 @@ function ownerLabel(owner: 'operator' | 'client' | 'unknown'): string {
 }
 
 function ageLabel(row: Record<string, unknown>): string {
-  const age = text(row.age);
-  if (age) return age;
   const days = decisionAgeDays(row);
-  if (days == null) return 'age unknown';
+  if (days == null) return '—';
   if (days < 1) return `${Math.max(1, Math.round(days * 24))}h`;
+  if (days >= 30) return '30d+';
   return `${Math.round(days)}d`;
+}
+
+function ageTone(row: Record<string, unknown>): 'auto' | 'authorize' | 'destructive' {
+  const days = decisionAgeDays(row);
+  if (days == null || days <= 2) return 'auto';
+  if (days <= 7) return 'authorize';
+  return 'destructive';
+}
+
+function stateBadgeTone(state: string): string {
+  if (state === 'unrouted') return 'awaiting_operator_confirm';
+  return state;
+}
+
+function stateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    unrouted: 'Open',
+    routed: 'Sent',
+    link_clicked: 'Viewed',
+    awaiting_operator_confirm: 'Needs review',
+    answered: 'Answered',
+    expired: 'Expired',
+    paused: 'Paused',
+    snoozed: 'Snoozed',
+  };
+  return labels[state] ?? state.replace(/_/g, ' ');
+}
+
+function decisionCta(state: string | null): string {
+  if (state === 'awaiting_operator_confirm' || state === 'answered') return 'Review reply';
+  if (state === 'routed' || state === 'link_clicked') return 'Resend';
+  return 'Send to client';
+}
+
+function decisionOptionsCopy(owner: 'operator' | 'client' | 'unknown', state: string | null, options: { id: string; label: string }[], row: DecisionRow): string {
+  if (state === 'awaiting_operator_confirm') return 'Review reply';
+  if (state === 'answered') return `Answered: ${text(row.selected_option) ?? text(row.answer_label) ?? text(row.answer_value) ?? '—'}`;
+  if (state === 'routed' || state === 'link_clicked') {
+    if (options.length) {
+      const count = options.length;
+      return `Sent ${count} option${count === 1 ? '' : 's'}: ${options.slice(0, 3).map((option) => option.label).join(' · ')}`;
+    }
+    return 'Sent — awaiting reply.';
+  }
+  if (options.length) return options.slice(0, 3).map((option) => option.label).join(' · ');
+  if (owner === 'operator') return 'Free-form — answer in your own words.';
+  if (owner === 'unknown') return 'Assign an owner to continue.';
+  return 'AI will draft options when you send.';
 }
 
 function text(value: unknown): string | null {
