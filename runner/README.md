@@ -108,6 +108,12 @@ Save as `~/Library/LaunchAgents/ai.blackrock.command-center-runner.plist`, then 
 
 Keep `.env` in the runner directory; Bun loads it when the process starts from `WorkingDirectory`.
 
+## Telegram notifications (optional)
+
+Telegram is configured on the control-plane Edge Function, not in `runner/.env`. The runner only calls `cc-telegram-notify` with its existing control-plane URL and service-role key after a PR opens; the edge function holds `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OPERATOR_CHAT_ID` and handles the kill switch when they are unset.
+
+See `../docs/TELEGRAM_SETUP.md` for the BotFather setup, chat ID lookup, Supabase secret commands, and smoke-test curls.
+
 ## Graceful restart
 
 Send SIGTERM or press Ctrl-C. The daemon stops claiming new work, finishes the current work order if one is running, then exits. It does not hard-kill a long Claude Code run during shutdown; if the host dies, the lease expires and the sweeper reclaims the order.

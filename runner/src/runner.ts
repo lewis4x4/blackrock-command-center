@@ -5,6 +5,17 @@ import type { Logger } from "./log";
 import type { WorkspaceManager, Workspace } from "./workspace";
 import { compactError, runNotes, RUNNER_ADAPTER, safeAudit, usageFromClaude } from "./audit";
 
+export type TelegramNotifyPayload = {
+  event_type: "work_order_pr_opened";
+  severity: "low" | "normal" | "high" | "critical";
+  app_id?: string;
+  title: string;
+  body: string;
+  deep_link?: string;
+};
+
+export type TelegramNotifier = (payload: TelegramNotifyPayload) => Promise<void>;
+
 export type RunnerDeps = {
   controlPlane: ControlPlane;
   tokenProvider: GitHubTokenProvider;
@@ -12,6 +23,7 @@ export type RunnerDeps = {
   workspaceManager: WorkspaceManager;
   claudeCode: ClaudeCodeRunner;
   logger: Logger;
+  telegramNotifier?: TelegramNotifier;
 };
 
 export type RunnerOptions = {
@@ -476,6 +488,7 @@ export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, o
       pr_url: prUrl,
       runner: RUNNER_ADAPTER,
     });
+    await notifyPrOpened(deps, options.runnerId, workOrder, prUrl);
 
     logger.info("work order completed", { work_order_id: workOrder.id, pr_url: prUrl });
     return { status: "succeeded", prUrl };
@@ -582,6 +595,29 @@ class LeaseMonitor {
   private loseLease(): void {
     this.leaseLost = new LeaseLostError(this.input.workOrderId);
     this.controller.abort();
+  }
+}
+
+async function notifyPrOpened(deps: RunnerDeps, runnerId: string, workOrder: WorkOrder, prUrl: string): Promise<void> {
+  if (!deps.telegramNotifier) return;
+  try {
+    await deps.telegramNotifier({
+      event_type: "work_order_pr_opened",
+      severity: "normal",
+      app_id: workOrder.app_id,
+      title: "PR ready for review",
+      body: `Work order ${workOrder.id} opened a PR for ${workOrder.target_repo}.`,
+      deep_link: prUrl,
+    });
+  } catch (error) {
+    const message = compactError(error);
+    deps.logger.error("telegram notification failed", { work_order_id: workOrder.id, error: message });
+    await safeAudit(deps.controlPlane, workOrder.app_id, runnerId, "telegram_notify_failed", {
+      work_order_id: workOrder.id,
+      pr_url: prUrl,
+      event_type: "work_order_pr_opened",
+      error: message,
+    });
   }
 }
 

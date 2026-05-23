@@ -1,7 +1,7 @@
-import { forwardRef, useEffect, useImperativeHandle, useState, type ReactNode } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react';
 import {
-  ago, colorFor, loadAgents,
-  type AgentRun, type AgentsPayload, type AgentWorkOrder, type CostLedgerRow, type RunnerStatus,
+  acknowledgeHandoff, ago, approveWorkOrder, colorFor, loadAgents, loadHandoffs,
+  type AgentRun, type AgentsPayload, type AgentWorkOrder, type CostLedgerRow, type OperatorHandoff, type RunnerStatus,
 } from './lib';
 
 export type AgentsViewHandle = {
@@ -26,18 +26,21 @@ type LoadState = 'loading' | 'ready' | 'error';
 export const AgentsView = forwardRef<AgentsViewHandle, { demo: boolean }>(function AgentsView({ demo }, ref) {
   const [state, setState] = useState<LoadState>('loading');
   const [payload, setPayload] = useState<AgentsPayload>(emptyAgents);
+  const [handoffs, setHandoffs] = useState<OperatorHandoff[]>([]);
   const [error, setError] = useState('');
 
   async function refresh() {
     setState('loading');
     setError('');
     try {
-      const next = await loadAgents(demo);
+      const [next, nextHandoffs] = await Promise.all([loadAgents(demo), loadHandoffs(demo)]);
       setPayload(next);
+      setHandoffs(nextHandoffs);
       setState('ready');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPayload(emptyAgents);
+      setHandoffs([]);
       setState('error');
     }
   }
@@ -65,7 +68,8 @@ export const AgentsView = forwardRef<AgentsViewHandle, { demo: boolean }>(functi
       />
       {state === 'error' && <InlineError message={error} />}
       <RunnerStatusPill status={payload.runner_status} />
-      <QueueBand orders={openOrders} loading={state === 'loading'} />
+      <QueueBand orders={openOrders} loading={state === 'loading'} demo={demo} onChanged={refresh} />
+      <OperatorHandoffsPanel handoffs={handoffs} loading={state === 'loading'} demo={demo} onChanged={refresh} />
       <RunsBand runs={recentRuns} loading={state === 'loading'} />
       <CostLedgerBand rows={ledgerRows} grandTotal={payload.cost_ledger_summary.grand_total_usd} loading={state === 'loading'} />
     </div>
@@ -117,10 +121,61 @@ function RunnerStatusPill({ status }: { status: RunnerStatus }) {
   );
 }
 
-function QueueBand({ orders, loading }: { orders: AgentWorkOrder[]; loading: boolean }) {
+type CollapsedNotice = { id: string; title: string; action: string };
+
+function QueueBand({ orders, loading, demo, onChanged }: { orders: AgentWorkOrder[]; loading: boolean; demo: boolean; onChanged: () => void | Promise<void> }) {
+  const [pending, setPending] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<string, CollapsedNotice>>({});
+  const [error, setError] = useState('');
+  const timers = useRef<Record<string, number>>({});
+
+  useEffect(() => () => {
+    Object.values(timers.current).forEach(window.clearTimeout);
+  }, []);
+
+  const visibleOrders = orders.filter((order) => !collapsed[order.id]);
+  const notices = Object.values(collapsed);
+
+  async function authorize(order: AgentWorkOrder) {
+    setPending(order.id);
+    setError('');
+    try {
+      await approveWorkOrder(order.id, demo);
+      collapseWithUndo(order.id, intent(order), 'Authorized');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  function collapseWithUndo(id: string, title: string, action: string) {
+    window.clearTimeout(timers.current[id]);
+    setCollapsed((current) => ({ ...current, [id]: { id, title, action } }));
+    timers.current[id] = window.setTimeout(() => {
+      setCollapsed((current) => {
+        const { [id]: _removed, ...rest } = current;
+        void _removed;
+        return rest;
+      });
+      void onChanged();
+    }, 6000);
+  }
+
+  function undo(id: string) {
+    window.clearTimeout(timers.current[id]);
+    setCollapsed((current) => {
+      const { [id]: _removed, ...rest } = current;
+      void _removed;
+      return rest;
+    });
+  }
+
   return (
     <AgentsSection title="Queue" subtitle="Open work orders: queued, gated, claimed, dispatched, building, or PR open." count={orders.length}>
-      {loading ? <SkeletonRows /> : orders.length === 0 ? (
+      {error && <div className="detail-note error agents-inline-error">Approval failed: {error}</div>}
+      <UndoNotices notices={notices} onUndo={undo} />
+      {loading ? <SkeletonRows /> : visibleOrders.length === 0 ? (
         <EmptyState title="Queue is empty" copy="No open work orders are waiting on the runner right now." />
       ) : (
         <div className="agents-table-wrap">
@@ -134,28 +189,143 @@ function QueueBand({ orders, loading }: { orders: AgentWorkOrder[]; loading: boo
                 <th>Claimed by</th>
                 <th>Attempts</th>
                 <th>Age</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {orders.map((order) => (
-                <tr key={order.id}>
-                  <td><AppBadge app={order.app} fallbackId={order.app_id} /></td>
-                  <td>
-                    <div className="agents-primary">{intent(order)}</div>
-                    <div className="agents-muted">{text(order.change_spec.affected_area) ?? order.target_repo ?? 'structured change spec'}</div>
-                  </td>
-                  <td><span className={'status-chip ' + order.status}>{label(order.status)}</span></td>
-                  <td><span className={'risk-chip ' + order.risk_class}>{order.risk_class}</span></td>
-                  <td>{order.claimed_by ?? '—'}</td>
-                  <td>{order.attempt_count} / {order.max_attempts}</td>
-                  <td>{ago(order.created_at) ?? '—'}</td>
-                </tr>
-              ))}
+              {visibleOrders.map((order) => {
+                const isPending = pending === order.id;
+                return (
+                  <tr key={order.id} className={isPending ? 'agents-row-pending' : ''}>
+                    <td><AppBadge app={order.app} fallbackId={order.app_id} /></td>
+                    <td>
+                      <div className="agents-primary">{intent(order)}</div>
+                      <div className="agents-muted">{text(order.change_spec.affected_area) ?? order.target_repo ?? 'structured change spec'}</div>
+                    </td>
+                    <td><span className={'status-chip ' + order.status}>{label(order.status)}</span></td>
+                    <td><span className={'risk-chip ' + order.risk_class}>{order.risk_class}</span></td>
+                    <td>{order.claimed_by ?? '—'}</td>
+                    <td>{order.attempt_count} / {order.max_attempts}</td>
+                    <td>{ago(order.created_at) ?? '—'}</td>
+                    <td>
+                      {order.status === 'gated' ? (
+                        <button className="act-btn agents-action" onClick={() => void authorize(order)} disabled={pending !== null}>
+                          {isPending ? 'Authorizing…' : 'Authorize'}
+                        </button>
+                      ) : <span className="agents-muted">—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
     </AgentsSection>
+  );
+}
+
+function OperatorHandoffsPanel({ handoffs, loading, demo, onChanged }: { handoffs: OperatorHandoff[]; loading: boolean; demo: boolean; onChanged: () => void | Promise<void> }) {
+  const [pending, setPending] = useState<{ id: string; status: 'acknowledged' | 'done' } | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<string, CollapsedNotice>>({});
+  const [error, setError] = useState('');
+  const timers = useRef<Record<string, number>>({});
+
+  useEffect(() => () => {
+    Object.values(timers.current).forEach(window.clearTimeout);
+  }, []);
+
+  const visible = handoffs.filter((handoff) => !collapsed[handoff.id]);
+  const notices = Object.values(collapsed);
+
+  async function advance(handoff: OperatorHandoff, status: 'acknowledged' | 'done') {
+    setPending({ id: handoff.id, status });
+    setError('');
+    try {
+      await acknowledgeHandoff(handoff.id, status, undefined, demo);
+      collapseWithUndo(handoff.id, handoffTitle(handoff), status === 'done' ? 'Marked done' : 'Acknowledged');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  function collapseWithUndo(id: string, title: string, action: string) {
+    window.clearTimeout(timers.current[id]);
+    setCollapsed((current) => ({ ...current, [id]: { id, title, action } }));
+    timers.current[id] = window.setTimeout(() => {
+      setCollapsed((current) => {
+        const { [id]: _removed, ...rest } = current;
+        void _removed;
+        return rest;
+      });
+      void onChanged();
+    }, 6000);
+  }
+
+  function undo(id: string) {
+    window.clearTimeout(timers.current[id]);
+    setCollapsed((current) => {
+      const { [id]: _removed, ...rest } = current;
+      void _removed;
+      return rest;
+    });
+  }
+
+  return (
+    <AgentsSection title="Operator handoffs" subtitle="Manual runbooks that need operator action before F3 can close." count={handoffs.length}>
+      {error && <div className="detail-note error agents-inline-error">Handoff update failed: {error}</div>}
+      <UndoNotices notices={notices} onUndo={undo} />
+      {loading ? <SkeletonRows /> : visible.length === 0 ? (
+        <EmptyState title="No open handoffs" copy="No manual runbooks are waiting on you right now." />
+      ) : (
+        <div className="handoff-list">
+          {visible.map((handoff) => {
+            const pendingAction = pending?.id === handoff.id ? pending.status : null;
+            return (
+              <article className={'handoff-card ' + handoff.severity + (pendingAction ? ' agents-row-pending' : '')} key={handoff.id}>
+                <div className="handoff-card-head">
+                  <AppBadge app={handoff.app} fallbackId={handoff.app_id} />
+                  <span className={'risk-chip ' + severityTone(handoff.severity)}>{handoff.severity}</span>
+                  <span className={'status-chip ' + handoff.status}>{label(handoff.status)}</span>
+                </div>
+                <div className="handoff-meta">
+                  <span>{label(handoff.kind)}</span>
+                  <span>Created {ago(handoff.created_at) ?? 'recently'}</span>
+                  {handoff.work_order_id && <span>WO {shortId(handoff.work_order_id)}</span>}
+                </div>
+                <div className="handoff-runbook" dangerouslySetInnerHTML={{ __html: renderRunbookMarkdown(handoff.runbook_md) }} />
+                <div className="handoff-actions">
+                  {handoff.status === 'open' && (
+                    <button className="ghost-btn" onClick={() => void advance(handoff, 'acknowledged')} disabled={pending !== null}>
+                      {pendingAction === 'acknowledged' ? 'Acknowledging…' : 'Acknowledge'}
+                    </button>
+                  )}
+                  <button className="act-btn agents-action" onClick={() => void advance(handoff, 'done')} disabled={pending !== null}>
+                    {pendingAction === 'done' ? 'Saving…' : 'Mark done'}
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </AgentsSection>
+  );
+}
+
+function UndoNotices({ notices, onUndo }: { notices: CollapsedNotice[]; onUndo: (id: string) => void }) {
+  if (notices.length === 0) return null;
+  return (
+    <div className="agents-undo-stack">
+      {notices.map((notice) => (
+        <div className="agents-undo" key={notice.id}>
+          <span>{notice.action}: <b>{notice.title}</b>. Refreshing in 6 seconds.</span>
+          <button className="ghost-btn" onClick={() => onUndo(notice.id)}>Undo</button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -299,6 +469,70 @@ function text(value: unknown): string | null {
 
 function label(value: string): string {
   return value.replace(/_/g, ' ');
+}
+
+function handoffTitle(handoff: OperatorHandoff): string {
+  return `${handoff.app.display_name ?? handoff.app.short_code ?? shortId(handoff.app_id)} ${label(handoff.kind)}`;
+}
+
+function severityTone(severity: OperatorHandoff['severity']): string {
+  if (severity === 'critical' || severity === 'high') return 'production';
+  if (severity === 'normal') return 'authorize';
+  return 'auto';
+}
+
+function shortId(value: string): string {
+  return value.length > 8 ? value.slice(0, 8) : value;
+}
+
+function renderRunbookMarkdown(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const html: string[] = [];
+  let inList = false;
+  const closeList = () => {
+    if (inList) {
+      html.push('</ul>');
+      inList = false;
+    }
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    const listItem = trimmed.match(/^-\s+(.+)$/);
+    if (listItem) {
+      if (!inList) {
+        html.push('<ul>');
+        inList = true;
+      }
+      html.push(`<li>${inlineMarkdown(listItem[1] ?? '')}</li>`);
+      continue;
+    }
+    closeList();
+    if (trimmed.startsWith('### ')) html.push(`<h4>${inlineMarkdown(trimmed.slice(4))}</h4>`);
+    else if (trimmed.startsWith('## ')) html.push(`<h3>${inlineMarkdown(trimmed.slice(3))}</h3>`);
+    else if (trimmed.startsWith('# ')) html.push(`<h2>${inlineMarkdown(trimmed.slice(2))}</h2>`);
+    else html.push(`<p>${inlineMarkdown(trimmed)}</p>`);
+  }
+  closeList();
+  return html.join('');
+}
+
+function inlineMarkdown(value: string): string {
+  return escapeMarkdownHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function escapeMarkdownHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function money(value: number): string {

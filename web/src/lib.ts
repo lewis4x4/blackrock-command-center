@@ -133,6 +133,8 @@ export interface AppDetailPayload {
 
 export type WorkOrderStatus = 'queued' | 'gated' | 'claimed' | 'dispatched' | 'building' | 'pr_open' | 'done' | 'failed' | 'dead_lettered' | 'cancelled';
 export type AgentRunStatus = 'running' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+export type OperatorHandoffKind = 'manual_step' | 'compose_by_hand' | 'credential_rotation';
+export type OperatorHandoffStatus = 'open' | 'acknowledged' | 'done';
 export interface AgentAppIdentity { id: string | null; short_code: string | null; display_name: string | null; }
 export interface AgentWorkOrder {
   id: string;
@@ -160,6 +162,21 @@ export interface AgentWorkOrder {
   completed_at?: string | null;
   dead_lettered_at?: string | null;
   pr_url: string | null;
+}
+export interface OperatorHandoff {
+  id: string;
+  app_id: string;
+  kind: OperatorHandoffKind;
+  work_order_id: string | null;
+  issue_id: string | null;
+  runbook_md: string;
+  status: OperatorHandoffStatus;
+  created_at: string;
+  acknowledged_at: string | null;
+  completed_at: string | null;
+  severity: IssueSeverity;
+  deleted_at: string | null;
+  app: AgentAppIdentity;
 }
 export interface AgentRun {
   id: string;
@@ -210,6 +227,10 @@ export interface DispatchFromAnswerResponse {
 
 export interface ApproveWorkOrderResponse {
   work_order: WorkOrder;
+}
+
+export interface AcknowledgeHandoffResponse {
+  handoff: OperatorHandoff;
 }
 
 export interface AgentsPayload {
@@ -538,6 +559,24 @@ export const DEMO_AGENTS: AgentsPayload = {
   },
 };
 
+export const DEMO_HANDOFFS: OperatorHandoff[] = [
+  {
+    id: 'demo-handoff-qep-1',
+    app_id: 'qep',
+    kind: 'manual_step',
+    work_order_id: 'demo-wo-qep-gated-1',
+    issue_id: 'demo-qep-open-decisions',
+    runbook_md: '## Manual approval checklist\n\n- Open the QEP manager-routing policy.\n- Confirm the threshold matches the client answer.\n- **Do not merge** until the linked PR checks are green.\n\n`route_to_manager` is the selected answer.',
+    status: 'open',
+    created_at: isoAgo(12),
+    acknowledged_at: null,
+    completed_at: null,
+    severity: 'high',
+    deleted_at: null,
+    app: { id: 'qep', short_code: 'QEP', display_name: 'QEP OS' },
+  },
+];
+
 export const DEMO_ACTIVITY: ActivityEvent[] = [
   { occurred_at: isoAgo(2),   short_code: 'QEP', actor: 'aggregator', event_type: 'snapshot_captured', detail: { build_status: 'green' } },
   { occurred_at: isoAgo(4),   short_code: 'SCC', actor: 'aggregator', event_type: 'snapshot_captured', detail: { build_status: 'yellow' } },
@@ -612,6 +651,8 @@ const BUILD_STATUSES = new Set<BuildStatus>(['green', 'yellow', 'red', 'unknown'
 const RISK_CLASSES = new Set<RiskClass>(['auto', 'authorize', 'destructive', 'production']);
 const WORK_ORDER_STATUSES = new Set<WorkOrderStatus>(['queued', 'gated', 'claimed', 'dispatched', 'building', 'pr_open', 'done', 'failed', 'dead_lettered', 'cancelled']);
 const AGENT_RUN_STATUSES = new Set<AgentRunStatus>(['running', 'succeeded', 'failed', 'timed_out', 'cancelled']);
+const OPERATOR_HANDOFF_KINDS = new Set<OperatorHandoffKind>(['manual_step', 'compose_by_hand', 'credential_rotation']);
+const OPERATOR_HANDOFF_STATUSES = new Set<OperatorHandoffStatus>(['open', 'acknowledged', 'done']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -950,6 +991,24 @@ function parseAgentRunStatus(value: unknown): AgentRunStatus {
   return raw as AgentRunStatus;
 }
 
+function parseOperatorHandoffKind(value: unknown): OperatorHandoffKind {
+  const raw = asString(value);
+  if (!OPERATOR_HANDOFF_KINDS.has(raw as OperatorHandoffKind)) throw new Error(`cc-read-handoffs row has invalid kind: ${raw}`);
+  return raw as OperatorHandoffKind;
+}
+
+function parseOperatorHandoffStatus(value: unknown): OperatorHandoffStatus {
+  const raw = asString(value);
+  if (!OPERATOR_HANDOFF_STATUSES.has(raw as OperatorHandoffStatus)) throw new Error(`cc-read-handoffs row has invalid status: ${raw}`);
+  return raw as OperatorHandoffStatus;
+}
+
+function parseIssueSeverity(value: unknown): IssueSeverity {
+  const raw = asString(value);
+  if (!ISSUE_SEVERITIES.has(raw as IssueSeverity)) throw new Error(`cc-read-handoffs row has invalid severity: ${raw}`);
+  return raw as IssueSeverity;
+}
+
 function parseAgentWorkOrder(value: unknown): AgentWorkOrder {
   if (!isRecord(value)) throw new Error('cc-read-agents payload contains an invalid work order row');
   const id = asString(value.id);
@@ -982,6 +1041,30 @@ function parseAgentWorkOrder(value: unknown): AgentWorkOrder {
     completed_at: asString(value.completed_at),
     dead_lettered_at: asString(value.dead_lettered_at),
     pr_url: asString(value.pr_url),
+  };
+}
+
+function parseOperatorHandoff(value: unknown): OperatorHandoff {
+  if (!isRecord(value)) throw new Error('cc-read-handoffs payload contains an invalid handoff row');
+  const id = asString(value.id);
+  const appId = asString(value.app_id);
+  const runbookMd = asString(value.runbook_md);
+  const createdAt = asString(value.created_at);
+  if (!id || !appId || !runbookMd || !createdAt) throw new Error('cc-read-handoffs row is missing required fields');
+  return {
+    id,
+    app_id: appId,
+    kind: parseOperatorHandoffKind(value.kind),
+    work_order_id: asString(value.work_order_id),
+    issue_id: asString(value.issue_id),
+    runbook_md: runbookMd,
+    status: parseOperatorHandoffStatus(value.status),
+    created_at: createdAt,
+    acknowledged_at: asString(value.acknowledged_at),
+    completed_at: asString(value.completed_at),
+    severity: parseIssueSeverity(value.severity),
+    deleted_at: asString(value.deleted_at),
+    app: parseAgentAppIdentity(value.app),
   };
 }
 
@@ -1072,6 +1155,20 @@ function parseApproveWorkOrderResponse(value: unknown): ApproveWorkOrderResponse
   return { work_order: parseAgentWorkOrder(value.work_order) };
 }
 
+function parseHandoffsResponse(value: unknown): OperatorHandoff[] {
+  if (!isRecord(value) || !Array.isArray(value.handoffs)) {
+    throw new Error('cc-read-handoffs payload is invalid');
+  }
+  return value.handoffs.map(parseOperatorHandoff);
+}
+
+function parseAcknowledgeHandoffResponse(value: unknown): AcknowledgeHandoffResponse {
+  if (!isRecord(value) || !isRecord(value.handoff)) {
+    throw new Error('cc-acknowledge-handoff payload is invalid');
+  }
+  return { handoff: parseOperatorHandoff(value.handoff) };
+}
+
 /* SOURCE 1 — cc-read-home (merged app strip/cards + issue ledger payload). */
 export async function loadHome(demo: boolean): Promise<HomePayload> {
   if (demo) return { apps: structuredClone(DEMO_APPS), issues: structuredClone(DEMO_ISSUES) };
@@ -1112,6 +1209,16 @@ export async function loadAuditPage(demo: boolean, cursor?: string | null, filte
 export async function loadAgents(demo: boolean): Promise<AgentsPayload> {
   if (demo) return structuredClone(DEMO_AGENTS);
   return parseAgentsResponse(await fetchJson('cc-read-agents'));
+}
+
+export async function loadHandoffs(demo: boolean, appId?: string): Promise<OperatorHandoff[]> {
+  if (demo) {
+    const rows = structuredClone(DEMO_HANDOFFS).filter((row) => row.status === 'open');
+    return appId ? rows.filter((row) => row.app_id === appId) : rows;
+  }
+  const params = new URLSearchParams();
+  if (appId) params.set('app_id', appId);
+  return parseHandoffsResponse(await fetchJson('cc-read-handoffs', params));
 }
 
 /* SOURCE 4 — cc-read-settings (Settings nav page five-band envelope). */
@@ -1293,6 +1400,26 @@ export async function approveWorkOrder(workOrderId: string, demo = false): Promi
     });
   }
   return parseApproveWorkOrderResponse(await postJson('cc-approve-work-order', { work_order_id: workOrderId }));
+}
+
+export async function acknowledgeHandoff(handoffId: string, status: 'acknowledged' | 'done', note?: string, demo = false): Promise<AcknowledgeHandoffResponse> {
+  if (demo) {
+    const now = new Date().toISOString();
+    const handoff = DEMO_HANDOFFS.find((row) => row.id === handoffId);
+    if (!handoff) throw new Error('demo handoff not found');
+    if (status === 'acknowledged' && handoff.status === 'open') {
+      handoff.status = 'acknowledged';
+      handoff.acknowledged_at = handoff.acknowledged_at ?? now;
+    }
+    if (status === 'done' && handoff.status !== 'done') {
+      handoff.status = 'done';
+      handoff.acknowledged_at = handoff.acknowledged_at ?? now;
+      handoff.completed_at = handoff.completed_at ?? now;
+    }
+    void note;
+    return { handoff: structuredClone(handoff) };
+  }
+  return parseAcknowledgeHandoffResponse(await postJson('cc-acknowledge-handoff', { handoff_id: handoffId, status, note }));
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */

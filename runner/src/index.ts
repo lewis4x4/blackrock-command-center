@@ -4,7 +4,7 @@ import { GitHubApp, MockGitHubApp } from "./githubApp";
 import { createLogger } from "./log";
 import { RealClaudeCode, MockClaudeCode } from "./claudeCode";
 import { MockWorkspaceManager, RealWorkspaceManager } from "./workspace";
-import { RunnerDaemon } from "./runner";
+import { RunnerDaemon, type TelegramNotifyPayload } from "./runner";
 
 async function main(): Promise<void> {
   const config = parseConfig();
@@ -38,6 +38,7 @@ async function main(): Promise<void> {
       workspaceManager,
       claudeCode,
       logger,
+      telegramNotifier: createTelegramNotifier(config.controlPlaneUrl, config.controlPlaneServiceKey),
     },
     {
       runnerId: config.runnerId,
@@ -52,6 +53,27 @@ async function main(): Promise<void> {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   await daemon.runForever();
+}
+
+function createTelegramNotifier(controlPlaneUrl: string, serviceRoleKey: string): (payload: TelegramNotifyPayload) => Promise<void> {
+  return async (payload: TelegramNotifyPayload): Promise<void> => {
+    const response = await fetch(`${controlPlaneUrl}/functions/v1/cc-telegram-notify`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5000),
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`cc-telegram-notify returned HTTP ${response.status}: ${text}`);
+    if (!text) return;
+    const body = JSON.parse(text) as unknown;
+    if (body && typeof body === "object" && "ok" in body && (body as { ok?: unknown }).ok === false) {
+      throw new Error(`cc-telegram-notify returned ok=false: ${text}`);
+    }
+  };
 }
 
 main().catch((error) => {

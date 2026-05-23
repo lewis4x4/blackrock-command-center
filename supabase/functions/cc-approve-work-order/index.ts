@@ -159,6 +159,29 @@ function rpcErrorResponse(e: RpcError, accessCheck: "noop" | "pass"): Response {
   return buildJsonResponse({ error: "approval failed", detail }, status, accessCheck);
 }
 
+async function notifyTelegram(workOrder: Record<string, unknown>): Promise<void> {
+  const workOrderId = cleanString(workOrder.id, 80) ?? "unknown";
+  const appId = cleanString(workOrder.app_id, 80);
+  const riskClass = cleanString(workOrder.risk_class, 80) ?? "unknown";
+  const r = await fetch(`${CP_URL}/functions/v1/cc-telegram-notify`, {
+    method: "POST",
+    signal: AbortSignal.timeout(5000),
+    headers: {
+      Authorization: `Bearer ${CP_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "work_order_approved",
+      severity: "low",
+      app_id: appId,
+      title: "Work order approved",
+      body: `Work order ${workOrderId} was approved and returned to the runner queue. Risk class: ${riskClass}.`,
+      deep_link: "/agents",
+    }),
+  });
+  if (!r.ok) throw new Error(`cc-telegram-notify returned HTTP ${r.status}: ${await r.text()}`);
+}
+
 console.log(`[${FUNCTION_NAME}] ready`);
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -178,6 +201,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     const workOrder = await approveWorkOrder(parsed.workOrderId, access.actor);
+    void notifyTelegram(workOrder).catch((notifyError) => {
+      console.log(`[${FUNCTION_NAME}] telegram notify failed`, { error: notifyError instanceof Error ? notifyError.message : String(notifyError) });
+    });
     return buildJsonResponse({ work_order: workOrder }, 200, access.headerValue);
   } catch (e) {
     if (e instanceof RpcError) return rpcErrorResponse(e, access.headerValue);
