@@ -427,6 +427,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let apps: AppRecord[];
   let dpRows: DataPlaneRecord[];
   let answeredRecent: unknown[];
+  let answeredSendRows: unknown[];
   let pendingReviews: unknown[];
   let aggregateIssueByApp: Map<string, string> = new Map();
   try {
@@ -437,7 +438,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews, rawAnsweredSendRows] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
@@ -448,9 +449,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
       appId
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
+      cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via"),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
+    answeredSendRows = rawAnsweredSendRows;
     pendingReviews = rawPendingReviews;
     // Map: app_id -> most recent aggregate open_decision cc_issues.id
     aggregateIssueByApp = new Map();
@@ -484,12 +487,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const decisions = applyFilters(allDecisions, ownerFilter, maxAgeDays).slice(0, limit);
 
   const appById = new Map(apps.map((app) => [app.app_id, app]));
+  const createdViaByAnswerId = new Map(
+    answeredSendRows.filter(isRecord)
+      .map((row) => [asString(row.decision_answer_id), asString(row.created_via)])
+      .filter(([id, via]) => !!id && !!via) as Array<[string, string]>
+  );
   const payload = {
     apps_reached: appsReached,
     apps_unreachable: appsUnreachable,
     apps_unwired: appsUnwired,
     decisions,
-    answered_recent: answeredRecent.map(answeredSummary),
+    answered_recent: answeredRecent.map((row) => {
+      const summary = answeredSummary(row);
+      const id = asString(summary.id);
+      return { ...summary, created_via: id ? (createdViaByAnswerId.get(id) ?? 'manual') : 'manual' };
+    }),
     pending_reviews: pendingReviews.filter(isRecord).map((row) => {
       const app = appById.get(asString(row.app_id) ?? "");
       return {

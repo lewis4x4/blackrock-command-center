@@ -307,7 +307,7 @@ function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; load
               </div>
               <div className="answered-main">
                 <b>{row.decision_external_ref ?? 'Decision answered'}</b>
-                <span>{row.answer_value} · {row.risk_class}</span>
+                <span>{row.answer_value} · {row.risk_class}{row.created_via === 'auto_route' ? ' · auto-routed' : ''}</span>
               </div>
               <div className="answered-age">{ago(row.answered_at) ?? '—'}</div>
             </div>

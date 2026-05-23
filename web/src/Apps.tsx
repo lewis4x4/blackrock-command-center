@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
 import { ProjectGrid } from './Home';
 import {
-  addDecisionRecipient, ago, deleteDecisionRecipient, editAppBasics, editDecisionRecipient, loadDecisionRecipients, registerApp,
+  addDecisionRecipient, ago, deleteDecisionRecipient, editAppBasics, editDecisionRecipient, loadDecisionRecipients, registerApp, setAutoRoute,
   type AppRow, type DecisionRecipient, type EditAppPayload, type RegisterAppPayload,
 } from './lib';
 
@@ -57,7 +57,31 @@ export function AppsView({ apps, demo, onChanged }: { apps: AppRow[]; demo: bool
             <span>Register the first app to put it on the board.</span>
           </div>
         ) : (
-          <ProjectGrid apps={sorted} onEdit={setEditing} />
+          <>
+            <ProjectGrid apps={sorted} onEdit={setEditing} />
+            <div className="panel-section">
+              <div className="panel-label">Auto-route eligible decisions</div>
+              <div className="panel-stack">
+                {sorted.map((app) => (
+                  <label key={`${app.id}-auto-route`} className="apps-auto-route-toggle">
+                    <input
+                      type="checkbox"
+                      checked={app.auto_route_decisions === true}
+                      onChange={async (ev) => {
+                        try {
+                          await setAutoRoute(app.id, ev.target.checked, demo);
+                          await changed(`${app.short_code} auto-route ${ev.target.checked ? 'enabled' : 'disabled'}.`);
+                        } catch (e) {
+                          setNotice(e instanceof Error ? e.message : String(e));
+                        }
+                      }}
+                    />
+                    <span>{app.short_code} · {app.display_name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </>
         )}
       </section>
 

@@ -49,6 +49,7 @@ export interface AppRow {
   integrations: Integrations;
   momentum: Momentum;
   sample?: boolean;
+  auto_route_decisions?: boolean;
 }
 
 export interface ActivityEvent {
@@ -715,6 +716,7 @@ function parseAppRow(value: unknown): AppRow {
     app_url: asString(value.app_url),
     integrations: parseIntegrations(value.integrations),
     momentum: parseMomentum(value.momentum),
+    auto_route_decisions: value.auto_route_decisions === true,
   };
 }
 
@@ -1397,7 +1399,7 @@ export function activityLine(ev: ActivityEvent): [string, string] {
 }
 
 // ===== Apps =====
-export type EditAppPayload = Partial<Pick<AppRow, 'display_name' | 'app_url' | 'criticality'>>;
+export type EditAppPayload = Partial<Pick<AppRow, 'display_name' | 'app_url' | 'criticality' | 'auto_route_decisions'>>;
 
 export interface RegisterAppPayload {
   short_code: string;
@@ -1412,6 +1414,25 @@ export interface RegisterAppPayload {
 function parseAppWriteResponse(value: unknown): AppRow {
   const rec = asRecord(value);
   return parseAppRow(rec.app ?? value);
+}
+
+export async function setAutoRoute(appId: string, enabled: boolean, demo = false): Promise<AppRow> {
+  if (demo) {
+    const app = DEMO_APPS.find((row) => row.id === appId);
+    if (!app) throw new Error('demo app not found');
+    app.auto_route_decisions = enabled;
+    return structuredClone(app);
+  }
+  const toggleToken = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_CC_AUTO_ROUTE_TOGGLE_TOKEN ?? '';
+  const res = await fetch(`${FUNCTIONS_URL}/cc-set-auto-route`, {
+    method: 'POST',
+    headers: { ...readHeaders(), 'Content-Type': 'application/json', 'x-cc-auto-route-toggle': toggleToken },
+    body: JSON.stringify({ app_id: appId, enabled }),
+  });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) throw cleanError('cc-set-auto-route', res.status, payload);
+  const result = asRecord(payload);
+  return parseAppRow(result.app);
 }
 
 export async function editAppBasics(appId: string, changes: EditAppPayload, demo = false): Promise<AppRow> {
@@ -1551,6 +1572,7 @@ export interface AnsweredDecisionSummary extends Record<string, unknown> {
   answered_by: string;
   answered_at: string;
   dispatched_at: string | null;
+  created_via?: 'manual' | 'auto_route';
 }
 
 export interface DecisionsPayload {
@@ -1671,6 +1693,7 @@ function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
     answered_by: answeredBy,
     answered_at: answeredAt,
     dispatched_at: asString(value.dispatched_at),
+    created_via: asString(value.created_via) === 'auto_route' ? 'auto_route' : 'manual',
   };
 }
 

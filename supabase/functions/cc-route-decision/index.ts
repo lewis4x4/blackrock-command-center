@@ -32,8 +32,27 @@ Deno.serve(async (req) => {
 
   try {
     const sendRows = await cpGet(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=eq.rewrite_ready&select=*`);
-    const baseSend = sendRows.find(isRecord);
-    if (!baseSend) return json({ error: "rewrite-ready send not found" }, 404, access.headerValue);
+    const existingSend = sendRows.find(isRecord);
+    if (!existingSend) return json({ error: "rewrite-ready send not found" }, 404, access.headerValue);
+
+    const existingCreatedVia = cleanString(existingSend.created_via, 40);
+    const existingClaimToken = cleanString(existingSend.claim_token, 80);
+    if (existingCreatedVia === "auto_route" && existingClaimToken) {
+      return json({ error: "auto-route finalize currently owns this send" }, 409, access.headerValue);
+    }
+
+    let baseSend = existingSend;
+    if (existingCreatedVia === "auto_route") {
+      const takeover = await cpPatch<Record<string, unknown>>(
+        `cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=eq.rewrite_ready&created_via=eq.auto_route&claim_token=is.null`,
+        { created_via: "manual", claim_token: null },
+      );
+      if (takeover.length !== 1) {
+        return json({ error: "send became unavailable for manual takeover" }, 409, access.headerValue);
+      }
+      baseSend = takeover[0];
+    }
+
     const appId = cleanString(baseSend.app_id, 80)!;
     const issueId = cleanString(baseSend.issue_id, 80)!;
 
@@ -79,6 +98,7 @@ Deno.serve(async (req) => {
         state: "sent",
         sent_at: new Date().toISOString(),
         last_error: null,
+        created_via: "manual",
       });
       const updated = updatedRows[0];
       sent.push(updated);
@@ -122,6 +142,7 @@ async function cloneSend(base: Record<string, unknown>): Promise<Record<string, 
     magic_link_expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
     state: "rewrite_ready",
     max_attempts: base.max_attempts ?? 3,
+    created_via: "manual",
   });
   const row = rows[0];
   if (!row?.id) throw new Error("send clone returned no id");
