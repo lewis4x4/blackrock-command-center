@@ -122,7 +122,7 @@ export class SupabaseControlPlane implements ControlPlane {
     this.headers = {
       apikey: serviceRoleKey,
       Authorization: `Bearer ${serviceRoleKey}`,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json; charset=utf-8",
     };
   }
 

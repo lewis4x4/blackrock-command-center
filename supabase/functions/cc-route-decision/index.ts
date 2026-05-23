@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, UUID_RE, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, cleanString, cpAudit, cpGet, cpInsert, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, UUID_RE, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-route-decision";
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
@@ -122,7 +122,14 @@ Deno.serve(async (req) => {
       });
     }
 
-    await cpPatch(`cc_issues?id=eq.${issueId}&deleted_at=is.null`, { status: "routed_to_client" });
+    const issueRows = await cpPatch<Record<string, unknown>>(`cc_issues?id=eq.${issueId}&deleted_at=is.null`, {
+      status: "routed_to_client",
+      resolved_at: new Date().toISOString(),
+    });
+    if (issueRows.length !== 1) {
+      await cpAudit(appId, access.actor, "decision_route_issue_transition_failed", { issue_id: issueId, sent_count: sent.length });
+      throw new Error("decision email sent, but issue transition to routed_to_client failed");
+    }
     return json({ sent }, 200, access.headerValue);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -183,7 +190,7 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `From: ${SENDER}`,
     `To: ${to}`,
     `Reply-To: ${REPLY_TO}`,
-    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `Subject: ${encodeRfc2047HeaderValue(input.subject)}`,
     `Message-ID: ${input.messageId}`,
     `X-CC-Send-Id: ${input.sendId}`,
     "MIME-Version: 1.0",

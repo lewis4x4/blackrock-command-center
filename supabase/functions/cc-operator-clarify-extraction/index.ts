@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-operator-clarify-extraction";
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
@@ -151,7 +151,7 @@ function composeMessage(input: { sendId: string; toName: string | null; toEmail:
     `From: ${SENDER}`,
     `To: ${to}`,
     `Reply-To: ${REPLY_TO}`,
-    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `Subject: ${encodeRfc2047HeaderValue(input.subject)}`,
     `X-CC-Send-Id: ${input.sendId}`,
     "X-CC-Clarification: 1",
     input.inReplyTo ? `In-Reply-To: ${stripHeaderUnsafe(input.inReplyTo)}` : null,

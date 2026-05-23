@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, cleanString, cpAudit, cpPatch, escapeHtml, gmailSend, isRecord, json, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, cleanString, cpAudit, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, isRecord, json, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-decision-reminder";
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
@@ -136,7 +136,7 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `From: ${SENDER}`,
     `To: ${to}`,
     `Reply-To: ${REPLY_TO}`,
-    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `Subject: ${encodeRfc2047HeaderValue(input.subject)}`,
     `Message-ID: ${input.messageId}`,
     `In-Reply-To: ${stripHeaderUnsafe(input.inReplyTo)}`,
     `References: ${stripHeaderUnsafe(input.references)}`,

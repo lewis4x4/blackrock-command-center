@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-auto-route-decisions";
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
@@ -215,7 +215,14 @@ Deno.serve(async (req) => {
         });
       }
 
-      await cpPatch(`cc_issues?id=eq.${issueId}&deleted_at=is.null`, { status: "routed_to_client" });
+      const issueRows = await cpPatch<Record<string, unknown>>(`cc_issues?id=eq.${issueId}&deleted_at=is.null`, {
+        status: "routed_to_client",
+        resolved_at: new Date().toISOString(),
+      });
+      if (issueRows.length !== 1) {
+        await cpAudit(appId, access.actor, "decision_auto_route_issue_transition_failed", { issue_id: issueId, send_id: sendId });
+        throw new Error("auto-route sent, but issue transition to routed_to_client failed");
+      }
       phaseA_finalized += 1;
     } catch (e) {
       errors.push({ phase: "A", send_id: sendId, error: e instanceof Error ? e.message : String(e) });
@@ -298,7 +305,7 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `From: ${SENDER}`,
     `To: ${to}`,
     `Reply-To: ${REPLY_TO}`,
-    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `Subject: ${encodeRfc2047HeaderValue(input.subject)}`,
     `Message-ID: ${input.messageId}`,
     `X-CC-Send-Id: ${input.sendId}`,
     "MIME-Version: 1.0",

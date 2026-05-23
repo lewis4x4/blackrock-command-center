@@ -11,7 +11,7 @@ export const CC_WRITE_TOKEN = Deno.env.get("CC_WRITE_TOKEN") ?? "";
 export const cpHeaders = {
   apikey: CP_KEY,
   Authorization: `Bearer ${CP_KEY}`,
-  "Content-Type": "application/json",
+  "Content-Type": "application/json; charset=utf-8",
 };
 
 export const corsHeaders = {
@@ -46,7 +46,7 @@ const jwkCache = new Map<string, VerifyKey>();
 export function json(body: unknown, status = 200, accessCheck: "noop" | "pass" = "noop", headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { ...corsHeaders, ...headers, "Content-Type": "application/json", "x-cc-access-check": accessCheck },
+    headers: { ...corsHeaders, ...headers, "Content-Type": "application/json; charset=utf-8", "x-cc-access-check": accessCheck },
   });
 }
 
@@ -204,6 +204,42 @@ export function encodeRfc822Base64Url(raw: string): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
+const RFC2047_PREFIX = "=?UTF-8?B?";
+const RFC2047_SUFFIX = "?=";
+const RFC2047_MAX_CHUNK_BYTES = 45;
+
+export function encodeRfc2047HeaderValue(value: string): string {
+  const safe = stripHeaderUnsafe(value);
+  if (/^[\x20-\x7E]*$/.test(safe)) return safe;
+
+  const encoder = new TextEncoder();
+  const words: string[] = [];
+  let chunk = "";
+  let chunkBytes = 0;
+
+  for (const char of safe) {
+    const bytes = encoder.encode(char);
+    if (chunk && chunkBytes + bytes.length > RFC2047_MAX_CHUNK_BYTES) {
+      words.push(encodeRfc2047Word(chunk));
+      chunk = char;
+      chunkBytes = bytes.length;
+    } else {
+      chunk += char;
+      chunkBytes += bytes.length;
+    }
+  }
+
+  if (chunk) words.push(encodeRfc2047Word(chunk));
+  return words.join("\r\n ");
+}
+
+function encodeRfc2047Word(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return `${RFC2047_PREFIX}${btoa(binary)}${RFC2047_SUFFIX}`;
+}
+
 export async function gmailAccessToken(): Promise<string> {
   const clientId = Deno.env.get("GMAIL_OAUTH_CLIENT_ID") ?? "";
   const clientSecret = Deno.env.get("GMAIL_OAUTH_CLIENT_SECRET") ?? "";
@@ -221,7 +257,7 @@ export async function gmailSend(rawRfc822: string): Promise<{ id: string; thread
   const token = await gmailAccessToken();
   const r = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ raw: encodeRfc822Base64Url(rawRfc822) }),
   });
   if (!r.ok) throw new Error(`Gmail send failed: ${r.status} ${await r.text()}`);

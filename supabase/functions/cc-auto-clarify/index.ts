@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { cleanString, cpAudit, cpPatch, escapeHtml, gmailSend, hmacSha256Hex, json, randomToken, rpc, stripHeaderUnsafe } from "../_shared/phase5.ts";
+import { cleanString, cpAudit, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, hmacSha256Hex, json, randomToken, rpc, stripHeaderUnsafe } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-auto-clarify";
 const INTERNAL_TOKEN = Deno.env.get("CC_INTERNAL_TOKEN") ?? "";
@@ -117,7 +117,7 @@ function composeMessage(input: { sendId: string; toName: string | null; toEmail:
     `From: ${SENDER}`,
     `To: ${to}`,
     `Reply-To: ${REPLY_TO}`,
-    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `Subject: ${encodeRfc2047HeaderValue(input.subject)}`,
     `X-CC-Send-Id: ${input.sendId}`,
     "X-CC-Clarification: 1",
     input.inReplyTo ? `In-Reply-To: ${stripHeaderUnsafe(input.inReplyTo)}` : null,
