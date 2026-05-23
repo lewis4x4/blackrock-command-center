@@ -433,3 +433,6 @@ button.panel-card{cursor:pointer}.panel-card.selected{border-color:var(--accent)
   .file-age{grid-column:2;text-align:left}
   .file-detail-grid{grid-template-columns:1fr}
 }
+
+.pending-review-card .decision-options{font-style:italic;color:var(--muted)}
+.review-quote{padding:12px 14px;border-left:2px solid rgba(255,255,255,.18);background:rgba(255,255,255,.03);border-radius:8px}

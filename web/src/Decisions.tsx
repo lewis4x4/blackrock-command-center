@@ -1,11 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { SlideOver } from './SlideOver';
 import { DecisionRouteModal } from './DecisionRouteModal';
+import { ExtractionReviewModal } from './ExtractionReviewModal';
 import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
-  ago, colorFor, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions,
+  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction,
   type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus,
-  type DecisionsFilters, type DecisionsPayload, type DecisionSort,
+  type DecisionsFilters, type DecisionsPayload, type DecisionSort, type PendingReviewSend,
 } from './lib';
 
 export type DecisionsViewHandle = {
@@ -31,6 +32,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
   const [age, setAge] = useState<DecisionAgeFilter>('all');
   const [sort, setSort] = useState<DecisionSort>('oldest');
   const [openDecision, setOpenDecision] = useState<DecisionRow | null>(null);
+  const [openReview, setOpenReview] = useState<PendingReviewSend | null>(null);
 
   const filters: DecisionsFilters = useMemo(() => ({
     app_id: appId || undefined,
@@ -75,6 +77,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onRefresh={refresh}
       />
       {state === 'error' && <div className="detail-note error">Decisions read failed: {error}</div>}
+      <PendingReviewBand reviews={payload.pending_reviews ?? []} onOpen={setOpenReview} />
       <FilterBand
         appId={appId}
         appOptions={appOptions}
@@ -90,6 +93,14 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
       <AnsweredBand rows={payload.answered_recent} loading={state === 'loading'} />
       {openDecision && <DecisionDrawer decision={openDecision} demo={demo} onClose={() => setOpenDecision(null)} onAnswered={refresh} />}
+      <ExtractionReviewModal
+        review={openReview}
+        open={!!openReview}
+        onClose={() => setOpenReview(null)}
+        onConfirm={async (sendId, optionId, rationale) => { await confirmExtraction(sendId, optionId, rationale, demo); await refresh(); }}
+        onReject={async (sendId, reason) => { await rejectExtraction(sendId, reason, demo); await refresh(); }}
+        onClarify={async (sendId, message) => { await operatorClarifyExtraction(sendId, message, demo); await refresh(); }}
+      />
     </div>
   );
 });
@@ -121,6 +132,31 @@ function DecisionsHeader({ loading, generatedAt, openCount, operatorCount, clien
         <Metric label="Open decisions" value={String(openCount)} tone={openCount ? 'amber' : 'green'} />
         <Metric label="Operator-owned" value={String(operatorCount)} tone={operatorCount ? 'amber' : 'green'} />
         <Metric label="Client / unknown" value={`${clientCount} / ${unknownCount}`} tone={clientCount || unknownCount ? 'blue' : 'green'} />
+      </div>
+    </section>
+  );
+}
+
+function PendingReviewBand({ reviews, onOpen }: { reviews: PendingReviewSend[]; onOpen: (review: PendingReviewSend) => void }) {
+  if (!reviews.length) return null;
+  return (
+    <section className="band agents-section decisions-list-band">
+      <div className="band-head">
+        <span className="band-num">⚠</span>
+        <div>
+          <div className="band-title">Awaiting your review</div>
+          <div className="band-sub">Claude proposed an answer — confirm, choose differently, reject, or clarify.</div>
+        </div>
+        <span className="count-chip">{reviews.length}</span>
+      </div>
+      <div className="decision-card-list">
+        {reviews.map((review) => (
+          <button key={review.send_id} className="decision-card client pending-review-card" onClick={() => onOpen(review)}>
+            <div className="decision-card-top"><div className="decision-title">[{review.app_short_code}] {review.raw_decision_title}</div><span className="decision-state-badge awaiting_operator_confirm">needs review</span></div>
+            <div className="decision-meta">Reply from {review.recipient_name ?? review.recipient_email} · {ago(review.replied_at) ?? 'recently'}</div>
+            <div className="decision-options">“{review.raw_reply_text}”</div>
+          </button>
+        ))}
       </div>
     </section>
   );
@@ -224,7 +260,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         <span>{ownerLabel(owner)} owned</span>
         <span>{ageLabel(decision)}</span>
         <span>{text(decision.status) ?? 'open'}</span>
-        {emailState && <span className={'decision-state-badge ' + emailState}>{emailState.replace(/_/g, ' ')}</span>}
+        {emailState && <span className={'decision-state-badge ' + emailState}>{emailState === 'awaiting_operator_confirm' ? 'needs review' : emailState.replace(/_/g, ' ')}</span>}
       </div>
       <div className="decision-options">{options.length ? options.slice(0, 3).map((option) => option.label).join(' · ') : 'No enumerated options returned.'}</div>
       <span className="ghost-btn decision-route" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>Route to recipients</span>

@@ -1,5 +1,5 @@
 import type { ClaudeCodeRunner, ClaudeGoalResult } from "./claudeCode";
-import type { ControlPlane, RewriteTask, WorkOrder } from "./controlPlane";
+import type { ControlPlane, ExtractionTask, RewriteTask, WorkOrder } from "./controlPlane";
 import type { GitHubPullRequestClient, GitHubTokenProvider } from "./githubApp";
 import type { Logger } from "./log";
 import type { WorkspaceManager, Workspace } from "./workspace";
@@ -18,6 +18,8 @@ export type RunnerOptions = {
   runnerId: string;
   leaseSeconds: number;
   pollIntervalSeconds: number;
+  extractionAutoCommitConfidence: number;
+  extractionOffTopicFloor: number;
 };
 
 export type ExecuteResult = {
@@ -61,7 +63,12 @@ export class RunnerDaemon {
         this.current = executeWorkOrder(workOrder, this.deps, this.options);
       } else {
         const rewriteTask = await this.deps.controlPlane.claimRewriteTask(this.options.runnerId, this.options.leaseSeconds);
-        this.current = rewriteTask ? executeRewriteTask(rewriteTask, this.deps, this.options) : null;
+        if (rewriteTask) {
+          this.current = executeRewriteTask(rewriteTask, this.deps, this.options);
+        } else {
+          const extractionTask = await this.deps.controlPlane.claimExtractionTask(this.options.runnerId, this.options.leaseSeconds);
+          this.current = extractionTask ? executeExtractionTask(extractionTask, this.deps, this.options) : null;
+        }
       }
       if (!this.current) {
         await sleep(this.options.pollIntervalSeconds * 1000, () => this.stopping);
@@ -115,6 +122,21 @@ type RewriteOutput = {
   rewritten_options: Array<{ id: string; label: string }>;
 };
 
+type ExtractionOutput = {
+  matched_option_id: string | null;
+  confidence: number;
+  rationale: string;
+  ask_clarifying_question: string | null;
+  signals: {
+    explicit_option_mention: boolean;
+    explicit_accept_decline: boolean;
+    multi_option_mention: boolean;
+    off_topic: boolean;
+    hedging_language: boolean;
+  };
+  _hallucinated_option?: boolean;
+};
+
 function buildRewritePrompt(task: RewriteTask): string {
   const inputOptions = normalizeRewriteOptions(task.options_snapshot);
   const hasOptions = inputOptions.length > 0;
@@ -144,6 +166,158 @@ function buildRewritePrompt(task: RewriteTask): string {
       options: inputOptions,
     }, null, 2),
   ].join("\n");
+}
+
+export async function executeExtractionTask(task: ExtractionTask, deps: Pick<RunnerDeps, "controlPlane" | "claudeCode" | "logger">, options: Pick<RunnerOptions, "runnerId" | "extractionAutoCommitConfidence" | "extractionOffTopicFloor">): Promise<ExecuteResult> {
+  const { controlPlane, claudeCode, logger } = deps;
+  logger.info("extraction task claimed", {
+    send_id: task.id,
+    app_id: task.app_id,
+    issue_id: task.issue_id,
+    attempt_count: task.attempt_count,
+    claim_token: task.claim_token,
+  });
+  try {
+    const prompt = buildExtractionPrompt(task, options.extractionAutoCommitConfidence);
+    const result = await claudeCode.runPrompt({ prompt });
+    const parsed = parseExtractionOutput(result.stdout, task);
+    const outcome = decideExtractionOutcome(parsed, task, options.extractionAutoCommitConfidence, options.extractionOffTopicFloor);
+    const llmExtraction = {
+      ...parsed,
+      model: "claude-cli",
+      extracted_at: new Date().toISOString(),
+      runner_id: options.runnerId,
+      prompt_version: "slice2-v1",
+    };
+
+    if (outcome.kind === "answer") {
+      await controlPlane.finishExtractionWithAnswer(task.id, options.runnerId, task.claim_token, outcome.option_id, parsed.confidence, parsed.rationale, llmExtraction);
+      return { status: "succeeded" };
+    }
+    if (outcome.kind === "clarify") {
+      await controlPlane.finishExtractionWithClarify(task.id, options.runnerId, task.claim_token, outcome.clarifying_question, parsed.confidence, llmExtraction);
+      return { status: "succeeded" };
+    }
+    await controlPlane.finishExtractionNeedsReview(task.id, options.runnerId, task.claim_token, llmExtraction, outcome.reason);
+    return { status: "succeeded" };
+  } catch (error) {
+    const message = compactError(error);
+    logger.error("extraction task failed", { send_id: task.id, error: message });
+    try {
+      if (message.toLowerCase().includes("below auto-commit threshold")) {
+        await controlPlane.finishExtractionNeedsReview(task.id, options.runnerId, task.claim_token, {
+          matched_option_id: null,
+          confidence: 0,
+          rationale: "auto-commit threshold mismatch between runner env and DB GUC",
+          ask_clarifying_question: null,
+          signals: {
+            explicit_option_mention: false,
+            explicit_accept_decline: false,
+            multi_option_mention: false,
+            off_topic: false,
+            hedging_language: false,
+          },
+          requires_human: true,
+          reason: "low_confidence",
+          model: "claude-cli",
+          extracted_at: new Date().toISOString(),
+          runner_id: options.runnerId,
+          prompt_version: "slice2-v1",
+        }, "low_confidence");
+      } else {
+        await controlPlane.failExtractionTask(task.id, options.runnerId, task.claim_token, message);
+      }
+    } catch (failError) {
+      logger.error("failed to mark extraction task failed", { send_id: task.id, error: compactError(failError) });
+    }
+    return { status: "failed", error: message };
+  }
+}
+
+function buildExtractionPrompt(task: ExtractionTask, highThreshold: number): string {
+  const options = normalizeRewriteOptions(task.options_snapshot);
+  return [
+    "You extract a structured decision from a free-text email reply.",
+    "",
+    "Return ONLY valid JSON with these keys:",
+    "  matched_option_id        string | null",
+    "  confidence               number 0..1",
+    "  rationale                string (<= 240 chars)",
+    "  ask_clarifying_question  string | null  (<= 400 chars; required iff matched_option_id is null OR confidence < HIGH_THRESHOLD)",
+    "  signals                  { explicit_option_mention: boolean, explicit_accept_decline: boolean, multi_option_mention: boolean, off_topic: boolean, hedging_language: boolean }",
+    "",
+    "Rules:",
+    "- matched_option_id MUST be exactly one of the option ids listed below, or null.",
+    "- Never invent new option ids. Never reorder. Never edit labels.",
+    "- If the reply mentions multiple options positively, return matched_option_id=null and explain in rationale.",
+    "- If the reply is off-topic, return matched_option_id=null and signals.off_topic=true. Confidence should be low.",
+    "- If the reply asks a counter-question, return matched_option_id=null and propose a clarifying question.",
+    "- Hedging language forces confidence below HIGH_THRESHOLD even if a single option is mentioned.",
+    "",
+    `HIGH_THRESHOLD is ${highThreshold.toFixed(2)}.`,
+    "",
+    JSON.stringify({
+      decision_external_ref: task.decision_external_ref,
+      raw_question_title: task.raw_decision_title,
+      what_the_client_received: {
+        subject: task.rewritten_subject,
+        body: task.rewritten_body,
+      },
+      options,
+      client_reply: task.raw_reply_text,
+    }, null, 2),
+  ].join("\n");
+}
+
+export function parseExtractionOutput(stdout: string, task: Pick<ExtractionTask, "options_snapshot">): ExtractionOutput {
+  const jsonText = extractJsonObject(stdout);
+  const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+  const options = normalizeRewriteOptions(task.options_snapshot);
+  const optionIds = new Set(options.map((opt) => opt.id));
+  const rawMatched = stringValue(parsed.matched_option_id);
+  const hallucinated = !!rawMatched && !optionIds.has(rawMatched);
+  const matched = rawMatched && optionIds.has(rawMatched) ? rawMatched : null;
+  const confidence = clamp01(asNumber(parsed.confidence) ?? 0);
+  const rationale = (stringValue(parsed.rationale) ?? "").slice(0, 500);
+  const ask = (stringValue(parsed.ask_clarifying_question) ?? "").slice(0, 400) || null;
+  const signalsRaw = parsed.signals && typeof parsed.signals === "object" ? parsed.signals as Record<string, unknown> : {};
+  return {
+    matched_option_id: matched,
+    confidence,
+    rationale,
+    ask_clarifying_question: ask,
+    signals: {
+      explicit_option_mention: signalsRaw.explicit_option_mention === true,
+      explicit_accept_decline: signalsRaw.explicit_accept_decline === true,
+      multi_option_mention: signalsRaw.multi_option_mention === true,
+      off_topic: signalsRaw.off_topic === true,
+      hedging_language: signalsRaw.hedging_language === true,
+    },
+    _hallucinated_option: hallucinated,
+  };
+}
+
+function decideExtractionOutcome(parsed: ExtractionOutput, task: Pick<ExtractionTask, "clarification_attempt_count">, autoCommitThreshold: number, offTopicFloor: number):
+  | { kind: "answer"; option_id: string }
+  | { kind: "clarify"; clarifying_question: string }
+  | { kind: "needs_review"; reason: "off_topic" | "unparseable" | "option_hallucinated" | "budget_exhausted" | "low_confidence" } {
+  const hasQuestion = !!parsed.ask_clarifying_question?.trim();
+  if (parsed.signals.off_topic || parsed.confidence <= offTopicFloor) {
+    return { kind: "needs_review", reason: parsed.signals.off_topic ? "off_topic" : "unparseable" };
+  }
+  if (parsed._hallucinated_option) {
+    return { kind: "needs_review", reason: "option_hallucinated" };
+  }
+  if (!parsed.matched_option_id && !hasQuestion) {
+    return { kind: "needs_review", reason: "unparseable" };
+  }
+  if (parsed.matched_option_id && parsed.confidence >= autoCommitThreshold && !parsed.signals.multi_option_mention && !parsed.signals.hedging_language && !parsed.signals.off_topic) {
+    return { kind: "answer", option_id: parsed.matched_option_id };
+  }
+  if (task.clarification_attempt_count < 1 && !parsed.signals.off_topic) {
+    return { kind: "clarify", clarifying_question: parsed.ask_clarifying_question || "Just to confirm, which option should I move forward with?" };
+  }
+  return { kind: "needs_review", reason: task.clarification_attempt_count >= 1 ? "budget_exhausted" : "low_confidence" };
 }
 
 function parseRewriteOutput(stdout: string): RewriteOutput {
@@ -182,6 +356,22 @@ function normalizeRewriteOptions(value: unknown): Array<{ id: string; label: str
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, options: Pick<RunnerOptions, "runnerId" | "leaseSeconds">): Promise<ExecuteResult> {

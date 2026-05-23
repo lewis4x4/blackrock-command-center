@@ -1,0 +1,100 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, escapeHtml, gmailSend, json, stripHeaderUnsafe, verifyAccessJwt } from "../_shared/phase5.ts";
+
+const FUNCTION_NAME = "cc-operator-clarify-extraction";
+const SENDER = "Brian Lewis <brian.lewis@blackrockai.co>";
+const REPLY_TO = "brian.lewis@blackrockai.co";
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return json({ ok: true });
+  if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "noop");
+  const access = await verifyAccessJwt(ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"));
+  if (!access.ok) return json({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+
+  let body: unknown;
+  try { body = await req.json(); } catch { return json({ error: "body must be valid JSON" }, 400, access.headerValue); }
+  const sendId = cleanString((body as Record<string, unknown>)?.send_id, 80);
+  const message = cleanString((body as Record<string, unknown>)?.message, 4000);
+  if (!sendId || !UUID_RE.test(sendId)) return json({ error: "send_id must be a valid uuid" }, 400, access.headerValue);
+  if (!message) return json({ error: "message is required" }, 400, access.headerValue);
+
+  try {
+    const rows = await cpGet(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(extracting,replied,awaiting_clarify,clarify_sent,awaiting_operator_review)&select=*`);
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) return json({ error: "send not found or not clarifiable" }, 404, access.headerValue);
+
+    const recipientEmail = cleanString(row.recipient_email, 320);
+    const recipientName = cleanString(row.recipient_name, 160) ?? recipientEmail;
+    const subject = `Re: ${cleanString(row.rewritten_subject, 300) ?? cleanString(row.raw_decision_title, 300) ?? "Quick clarification"}`;
+    if (!recipientEmail) return json({ error: "send row missing recipient_email" }, 400, access.headerValue);
+
+    const raw = composeMessage({
+      sendId,
+      toName: recipientName,
+      toEmail: recipientEmail,
+      subject,
+      body: message,
+      inReplyTo: cleanString(row.gmail_message_id, 500),
+      references: cleanString(row.gmail_message_id, 500),
+    });
+    const gmail = await gmailSend(raw);
+
+    const updated = await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null`, {
+      state: "clarify_sent",
+      clarification_sent_at: new Date().toISOString(),
+      clarification_gmail_message_id: gmail.id,
+      claim_token: null,
+      extraction_started_at: null,
+    });
+
+    await cpAudit(cleanString(row.app_id, 80), access.actor, "decision_clarification_sent", {
+      send_id: sendId,
+      origin: "operator",
+      subject,
+      recipient_email: recipientEmail,
+      gmail_message_id: gmail.id,
+    });
+
+    return json({ send: updated[0] ?? row }, 200, access.headerValue);
+  } catch (e) {
+    return json({ error: "clarify extraction failed", detail: e instanceof Error ? e.message : String(e) }, 500, access.headerValue);
+  }
+});
+
+function composeMessage(input: { sendId: string; toName: string | null; toEmail: string; subject: string; body: string; inReplyTo: string | null; references: string | null }): string {
+  const boundary = `cc_${crypto.randomUUID()}`;
+  const to = input.toName && input.toName !== input.toEmail ? `"${stripHeaderUnsafe(input.toName).replaceAll('"', "'")}" <${input.toEmail}>` : input.toEmail;
+  const plain = `${input.body}\n\nThanks,\nBrian`;
+  const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.5;color:#111827;max-width:640px"><p>${escapeHtml(input.body).replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>")}</p><p>Thanks,<br>Brian</p></div>`;
+  const headers = [
+    `From: ${SENDER}`,
+    `To: ${to}`,
+    `Reply-To: ${REPLY_TO}`,
+    `Subject: ${stripHeaderUnsafe(input.subject)}`,
+    `X-CC-Send-Id: ${input.sendId}`,
+    "X-CC-Clarification: 1",
+    input.inReplyTo ? `In-Reply-To: ${stripHeaderUnsafe(input.inReplyTo)}` : null,
+    input.references ? `References: ${stripHeaderUnsafe(input.references)}` : null,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ].filter(Boolean) as string[];
+
+  return [
+    ...headers,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    plain,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    html,
+    "",
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+}

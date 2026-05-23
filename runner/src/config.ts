@@ -11,6 +11,8 @@ export type RunnerConfig = {
   mockMode: boolean;
   claudeCodeCommand: string;
   claudeCodeTimeoutSeconds: number;
+  extractionAutoCommitConfidence: number;
+  extractionOffTopicFloor: number;
 };
 
 type Env = Record<string, string | undefined>;
@@ -26,6 +28,15 @@ function parseIntEnv(name: string, raw: string | undefined, defaultValue: number
   if (!Number.isInteger(parsed) || parsed < opts.min || (opts.max != null && parsed > opts.max)) {
     const upper = opts.max == null ? "" : ` and <= ${opts.max}`;
     throw new Error(`${name} must be an integer >= ${opts.min}${upper}`);
+  }
+  return parsed;
+}
+
+function parseNumberEnv(name: string, raw: string | undefined, defaultValue: number, opts: { min: number; max: number }): number {
+  if (raw == null || raw.trim() === "") return defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < opts.min || parsed > opts.max) {
+    throw new Error(`${name} must be a number >= ${opts.min} and <= ${opts.max}`);
   }
   return parsed;
 }
@@ -61,5 +72,7 @@ export function parseConfig(env: Env = process.env): RunnerConfig {
     mockMode,
     claudeCodeCommand: env.CLAUDE_CODE_COMMAND?.trim() || "claude",
     claudeCodeTimeoutSeconds: parseIntEnv("CLAUDE_CODE_TIMEOUT_SECONDS", env.CLAUDE_CODE_TIMEOUT_SECONDS, 0, { min: 0 }),
+    extractionAutoCommitConfidence: parseNumberEnv("EXTRACTION_AUTO_COMMIT_CONFIDENCE", env.EXTRACTION_AUTO_COMMIT_CONFIDENCE, 1.01, { min: 0, max: 1.01 }),
+    extractionOffTopicFloor: parseNumberEnv("EXTRACTION_OFF_TOPIC_FLOOR", env.EXTRACTION_OFF_TOPIC_FLOOR, 0.20, { min: 0, max: 1 }),
   };
 }

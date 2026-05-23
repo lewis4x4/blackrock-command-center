@@ -1455,7 +1455,35 @@ export async function registerApp(payload: RegisterAppPayload, demo = false): Pr
 }
 
 // ===== Decisions =====
-export type DecisionEmailState = 'queued' | 'rewriting' | 'rewrite_ready' | 'sent' | 'delivered' | 'opened' | 'clicked' | 'replied' | 'extracting' | 'awaiting_clarify' | 'clarify_sent' | 'answered' | 'done' | 'reminded' | 'bounced' | 'expired' | 'failed';
+export type DecisionEmailState = 'queued' | 'rewriting' | 'rewrite_ready' | 'sent' | 'delivered' | 'opened' | 'clicked' | 'replied' | 'extracting' | 'awaiting_clarify' | 'clarify_sent' | 'awaiting_operator_review' | 'rejected_by_operator' | 'answered' | 'done' | 'reminded' | 'bounced' | 'expired' | 'failed';
+
+export interface DecisionExtractionLLM {
+  matched_option_id: string | null;
+  confidence: number;
+  rationale: string | null;
+  requires_human: boolean;
+  suggested_clarification: string | null;
+}
+
+export interface PendingReviewSend extends Record<string, unknown> {
+  send_id: string;
+  app_id: string;
+  app_short_code: string;
+  app_display_name: string;
+  issue_id: string;
+  decision_external_ref: string;
+  raw_decision_title: string;
+  raw_decision_body: string | null;
+  options_snapshot: DecisionOptionLike[];
+  recipient_id: string | null;
+  recipient_name: string | null;
+  recipient_email: string;
+  replied_at: string | null;
+  raw_reply_text: string;
+  llm_extraction: DecisionExtractionLLM | null;
+  clarification_attempt_count: number;
+  state: DecisionEmailState;
+}
 
 export interface DecisionEmailSend extends Record<string, unknown> {
   id: string;
@@ -1469,6 +1497,17 @@ export interface DecisionEmailSend extends Record<string, unknown> {
   rewritten_body: string | null;
   options_snapshot: unknown;
   last_error: string | null;
+  recipient_id?: string | null;
+  recipient_name?: string | null;
+  recipient_email?: string | null;
+  replied_at?: string | null;
+  raw_reply_text?: string | null;
+  llm_extraction?: DecisionExtractionLLM | null;
+  operator_confirmed_by?: string | null;
+  operator_confirmed_at?: string | null;
+  selected_option?: string | null;
+  clarification_attempt_count?: number;
+  clarification_sent_at?: string | null;
 }
 
 export interface RewriteDecisionPayload {
@@ -1520,6 +1559,7 @@ export interface DecisionsPayload {
   apps_unwired: DecisionsAppStatus[];
   decisions: DecisionRow[];
   answered_recent: AnsweredDecisionSummary[];
+  pending_reviews?: PendingReviewSend[];
   generated_at?: string;
 }
 
@@ -1533,12 +1573,54 @@ export interface DecisionsFilters {
   sort?: DecisionSort;
 }
 
+const DEMO_PENDING_REVIEWS: PendingReviewSend[] = [
+  {
+    send_id: 'demo-review-1',
+    app_id: 'qep',
+    app_short_code: 'QEP',
+    app_display_name: 'QEP OS',
+    issue_id: 'demo-qep-open-decisions',
+    decision_external_ref: 'Q10',
+    raw_decision_title: 'Rebate stacking rules',
+    raw_decision_body: 'When both rebates apply, what should we do?',
+    options_snapshot: [{ id: 'stack', label: 'Allow stacking' }, { id: 'pick_one', label: 'Customer picks one' }, { id: 'auto_pick', label: 'Auto-pick best rebate' }],
+    recipient_id: 'demo-rylee',
+    recipient_name: 'Rylee',
+    recipient_email: 'rylee@qep.com',
+    replied_at: new Date(Date.now() - 14 * 60_000).toISOString(),
+    raw_reply_text: "Let's go with the biggest one; no double dipping.",
+    llm_extraction: { matched_option_id: 'pick_one', confidence: 0.91, rationale: 'mentions biggest one + no double-dipping', requires_human: false, suggested_clarification: null },
+    clarification_attempt_count: 0,
+    state: 'awaiting_operator_review',
+  },
+  {
+    send_id: 'demo-review-2',
+    app_id: 'qep',
+    app_short_code: 'QEP',
+    app_display_name: 'QEP OS',
+    issue_id: 'demo-qep-open-decisions',
+    decision_external_ref: 'Q11',
+    raw_decision_title: 'Portal fallback copy',
+    raw_decision_body: 'Which copy variant should ship?',
+    options_snapshot: [{ id: 'plain', label: 'Plain language' }, { id: 'oem', label: 'Keep OEM terms' }],
+    recipient_id: 'demo-ryan',
+    recipient_name: 'Ryan McKenzie',
+    recipient_email: 'ryan@qep.com',
+    replied_at: new Date(Date.now() - 26 * 60_000).toISOString(),
+    raw_reply_text: 'Not sure — either could work. What do you recommend?',
+    llm_extraction: { matched_option_id: null, confidence: 0.42, rationale: 'ambiguous and asks counter-question', requires_human: true, suggested_clarification: 'Should we ship plain language or keep OEM terms?' },
+    clarification_attempt_count: 1,
+    state: 'awaiting_operator_review',
+  },
+];
+
 const emptyDecisionsPayload: DecisionsPayload = {
   apps_reached: [],
   apps_unreachable: [],
   apps_unwired: [],
   decisions: [],
   answered_recent: [],
+  pending_reviews: [],
 };
 
 function parseDecisionsAppStatus(value: unknown): DecisionsAppStatus {
@@ -1592,6 +1674,42 @@ function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
   };
 }
 
+function parseDecisionExtractionLLM(value: unknown): DecisionExtractionLLM | null {
+  const rec = asRecord(value);
+  if (!Object.keys(rec).length) return null;
+  return {
+    matched_option_id: asString(rec.matched_option_id),
+    confidence: asNumber(rec.confidence) ?? 0,
+    rationale: asString(rec.rationale),
+    requires_human: rec.requires_human === true,
+    suggested_clarification: asString(rec.suggested_clarification) ?? asString(rec.proposed_clarifying_question),
+  };
+}
+
+function parsePendingReviewSend(value: unknown): PendingReviewSend {
+  const rec = asRecord(value);
+  return {
+    ...rec,
+    send_id: asString(rec.send_id) ?? '',
+    app_id: asString(rec.app_id) ?? '',
+    app_short_code: asString(rec.app_short_code) ?? '',
+    app_display_name: asString(rec.app_display_name) ?? '',
+    issue_id: asString(rec.issue_id) ?? '',
+    decision_external_ref: asString(rec.decision_external_ref) ?? '',
+    raw_decision_title: asString(rec.raw_decision_title) ?? '',
+    raw_decision_body: asString(rec.raw_decision_body),
+    options_snapshot: Array.isArray(rec.options_snapshot) ? rec.options_snapshot.map(optionFromUnknown).filter((v): v is DecisionOptionLike => !!v) : [],
+    recipient_id: asString(rec.recipient_id),
+    recipient_name: asString(rec.recipient_name),
+    recipient_email: asString(rec.recipient_email) ?? '',
+    replied_at: asString(rec.replied_at),
+    raw_reply_text: asString(rec.raw_reply_text) ?? '',
+    llm_extraction: parseDecisionExtractionLLM(rec.llm_extraction),
+    clarification_attempt_count: asNumber(rec.clarification_attempt_count) ?? 0,
+    state: asString(rec.state) as DecisionEmailState,
+  };
+}
+
 function parseDecisionsPayload(value: unknown): DecisionsPayload {
   if (!isRecord(value) || !Array.isArray(value.decisions) || !Array.isArray(value.answered_recent)) {
     throw new Error('cc-read-decisions payload is invalid');
@@ -1602,6 +1720,7 @@ function parseDecisionsPayload(value: unknown): DecisionsPayload {
     apps_unwired: Array.isArray(value.apps_unwired) ? value.apps_unwired.map(parseDecisionsAppStatus) : [],
     decisions: value.decisions.map(parseDecisionRow),
     answered_recent: value.answered_recent.map(parseAnsweredDecisionSummary),
+    pending_reviews: Array.isArray(value.pending_reviews) ? value.pending_reviews.map(parsePendingReviewSend) : [],
     generated_at: asString(value.generated_at) ?? undefined,
   };
 }
@@ -1694,6 +1813,7 @@ function demoDecisionsPayload(filters: DecisionsFilters): DecisionsPayload {
     apps_reached: DEMO_APPS.map((app) => ({ app_id: app.id, app_short_code: app.short_code, app_display_name: app.display_name, reason: 'demo' })),
     decisions,
     answered_recent: [],
+    pending_reviews: structuredClone(DEMO_PENDING_REVIEWS),
     generated_at: new Date().toISOString(),
   };
 }
@@ -1702,6 +1822,43 @@ export async function loadDecisions(filters: DecisionsFilters, demo: boolean): P
   if (demo) return demoDecisionsPayload(filters);
   const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams(filters)));
   return { ...payload, decisions: sortDecisionRows(filterDecisionRows(payload.decisions, filters), filters.sort) };
+}
+
+export async function loadPendingReviews(demo: boolean): Promise<PendingReviewSend[]> {
+  if (demo) return demoDecisionsPayload({}).pending_reviews ?? [];
+  const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams({})));
+  return payload.pending_reviews ?? [];
+}
+
+export interface OperatorConfirmExtractionPayload {
+  send_id: string;
+  option_id: string;
+  rationale?: string | null;
+}
+
+export interface OperatorRejectExtractionPayload {
+  send_id: string;
+  reason: string;
+}
+
+export interface OperatorClarifyExtractionPayload {
+  send_id: string;
+  message: string;
+}
+
+export async function confirmExtraction(send_id: string, option_id: string, rationale?: string | null, demo = false): Promise<unknown> {
+  if (demo) return { send: { id: send_id, state: 'answered' }, answer: { decision_answer_id: `demo-${send_id}`, issue_id: 'demo' }, work_order: { id: `wo-${send_id}` }, dispatched: true };
+  return postJson('cc-operator-confirm-extraction', { send_id, option_id, rationale });
+}
+
+export async function rejectExtraction(send_id: string, reason: string, demo = false): Promise<unknown> {
+  if (demo) return { send: { id: send_id, state: 'expired', last_error: reason } };
+  return postJson('cc-operator-reject-extraction', { send_id, reason });
+}
+
+export async function operatorClarifyExtraction(send_id: string, message: string, demo = false): Promise<unknown> {
+  if (demo) return { send: { id: send_id, state: 'clarify_sent' } };
+  return postJson('cc-operator-clarify-extraction', { send_id, message });
 }
 
 function parseDecisionEmailSend(value: unknown): DecisionEmailSend {

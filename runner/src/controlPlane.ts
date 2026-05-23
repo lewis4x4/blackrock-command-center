@@ -29,6 +29,26 @@ export type RewriteTask = {
   max_attempts: number;
 };
 
+export type ExtractionTask = {
+  id: string;
+  app_id: string;
+  issue_id: string;
+  decision_external_ref: string;
+  raw_decision_title: string;
+  raw_decision_body: string | null;
+  rewritten_subject: string | null;
+  rewritten_body: string | null;
+  options_snapshot: unknown;
+  raw_reply_text: string;
+  recipient_email: string;
+  recipient_name: string | null;
+  claim_token: string;
+  clarification_attempt_count: number;
+  attempt_count: number;
+  max_attempts: number;
+  risk_class: "auto" | "authorize" | "destructive" | "production";
+};
+
 export type AgentRunStatus = "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
 
 export type AgentRun = {
@@ -71,6 +91,11 @@ export interface ControlPlane {
   claimRewriteTask(runnerId: string, leaseSeconds: number): Promise<RewriteTask | null>;
   finishRewriteTask(sendId: string, runnerId: string, subject: string, body: string, options: unknown): Promise<RewriteTask>;
   failRewriteTask(sendId: string, runnerId: string, error: string): Promise<RewriteTask>;
+  claimExtractionTask(runnerId: string, leaseSeconds: number): Promise<ExtractionTask | null>;
+  finishExtractionWithAnswer(sendId: string, runnerId: string, claimToken: string, optionId: string, confidence: number, rationale: string, llmExtraction: unknown): Promise<unknown>;
+  finishExtractionWithClarify(sendId: string, runnerId: string, claimToken: string, clarifyingQuestion: string, confidence: number, llmExtraction: unknown): Promise<ExtractionTask>;
+  finishExtractionNeedsReview(sendId: string, runnerId: string, claimToken: string, llmExtraction: unknown, reason: string): Promise<ExtractionTask>;
+  failExtractionTask(sendId: string, runnerId: string, claimToken: string, error: string): Promise<ExtractionTask>;
 }
 
 export class ControlPlaneHttpError extends Error {
@@ -217,6 +242,53 @@ export class SupabaseControlPlane implements ControlPlane {
     });
   }
 
+  async claimExtractionTask(runnerId: string, leaseSeconds: number): Promise<ExtractionTask | null> {
+    const row = await this.rpc<unknown>("cc_claim_extraction_task", { p_runner: runnerId, p_lease_seconds: leaseSeconds });
+    return asExtractionTaskOrNull(row);
+  }
+
+  async finishExtractionWithAnswer(sendId: string, runnerId: string, claimToken: string, optionId: string, confidence: number, rationale: string, llmExtraction: unknown): Promise<unknown> {
+    return await this.rpc<unknown>("cc_finish_extraction_with_answer", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_claim_token: claimToken,
+      p_option_id: optionId,
+      p_confidence: confidence,
+      p_rationale: rationale,
+      p_llm_extraction: llmExtraction,
+    });
+  }
+
+  async finishExtractionWithClarify(sendId: string, runnerId: string, claimToken: string, clarifyingQuestion: string, confidence: number, llmExtraction: unknown): Promise<ExtractionTask> {
+    return await this.rpc<ExtractionTask>("cc_finish_extraction_with_clarify", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_claim_token: claimToken,
+      p_clarifying_question: clarifyingQuestion,
+      p_confidence: confidence,
+      p_llm_extraction: llmExtraction,
+    });
+  }
+
+  async finishExtractionNeedsReview(sendId: string, runnerId: string, claimToken: string, llmExtraction: unknown, reason: string): Promise<ExtractionTask> {
+    return await this.rpc<ExtractionTask>("cc_finish_extraction_needs_review", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_claim_token: claimToken,
+      p_llm_extraction: llmExtraction,
+      p_reason: reason,
+    });
+  }
+
+  async failExtractionTask(sendId: string, runnerId: string, claimToken: string, error: string): Promise<ExtractionTask> {
+    return await this.rpc<ExtractionTask>("cc_fail_extraction_task", {
+      p_send_id: sendId,
+      p_runner: runnerId,
+      p_claim_token: claimToken,
+      p_error: error.slice(0, 2000),
+    });
+  }
+
   private async updateAgentRun(runId: string, input: Record<string, unknown>): Promise<AgentRun> {
     const payload = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
     const rows = await this.rest<AgentRun[]>(`/rest/v1/agent_runs?id=eq.${encodeURIComponent(runId)}`, {
@@ -270,4 +342,12 @@ function asRewriteTaskOrNull(value: unknown): RewriteTask | null {
   const row = value as Partial<RewriteTask>;
   if (typeof row.id !== "string" || !row.id) return null;
   return row as RewriteTask;
+}
+
+function asExtractionTaskOrNull(value: unknown): ExtractionTask | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<ExtractionTask>;
+  if (typeof row.id !== "string" || !row.id) return null;
+  if (typeof row.claim_token !== "string" || !row.claim_token) return null;
+  return row as ExtractionTask;
 }

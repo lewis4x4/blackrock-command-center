@@ -4,9 +4,9 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockWorkspaceManager } from "../src/workspace";
-import { executeWorkOrder, type RunnerDeps } from "../src/runner";
+import { executeExtractionTask, executeWorkOrder, parseExtractionOutput, type RunnerDeps } from "../src/runner";
 import { MockGitHubApp } from "../src/githubApp";
-import type { AgentRun, ControlPlane, FinishRunInput, RewriteTask, UsageUpdate, WorkOrder } from "../src/controlPlane";
+import type { AgentRun, ControlPlane, ExtractionTask, FinishRunInput, RewriteTask, UsageUpdate, WorkOrder } from "../src/controlPlane";
 import type { ClaudeCodeRunner, ClaudeGoalInput, ClaudeGoalResult, ClaudePromptInput } from "../src/claudeCode";
 import { createLogger } from "../src/log";
 
@@ -42,6 +42,10 @@ function sampleWorkOrder(overrides: Partial<WorkOrder> = {}): WorkOrder {
 }
 
 class FakeControlPlane implements ControlPlane {
+  extractionAnswered: Array<{ sendId: string; optionId: string }> = [];
+  extractionClarified: Array<{ sendId: string; question: string }> = [];
+  extractionReview: Array<{ sendId: string; reason: string }> = [];
+  extractionFailed: Array<{ sendId: string; error: string }> = [];
   completed: Array<{ workOrderId: string; prUrl: string }> = [];
   failed: Array<{ workOrderId: string; runnerId: string; error: string }> = [];
   finishedRuns: FinishRunInput[] = [];
@@ -52,6 +56,11 @@ class FakeControlPlane implements ControlPlane {
   async claimRewriteTask(): Promise<RewriteTask | null> { return null; }
   async finishRewriteTask(): Promise<RewriteTask> { throw new Error('not implemented in test fake'); }
   async failRewriteTask(): Promise<RewriteTask> { throw new Error('not implemented in test fake'); }
+  async claimExtractionTask(): Promise<ExtractionTask | null> { return null; }
+  async finishExtractionWithAnswer(sendId: string, _runnerId: string, _claimToken: string, optionId: string): Promise<unknown> { this.extractionAnswered.push({ sendId, optionId }); return {}; }
+  async finishExtractionWithClarify(sendId: string, _runnerId: string, _claimToken: string, clarifyingQuestion: string): Promise<ExtractionTask> { this.extractionClarified.push({ sendId, question: clarifyingQuestion }); return sampleExtractionTask(); }
+  async finishExtractionNeedsReview(sendId: string, _runnerId: string, _claimToken: string, _llmExtraction: unknown, reason: string): Promise<ExtractionTask> { this.extractionReview.push({ sendId, reason }); return sampleExtractionTask(); }
+  async failExtractionTask(sendId: string, _runnerId: string, _claimToken: string, error: string): Promise<ExtractionTask> { this.extractionFailed.push({ sendId, error }); return sampleExtractionTask(); }
   async renewLease(): Promise<WorkOrder | null> { this.heartbeats += 1; return sampleWorkOrder(); }
   async completeWorkOrder(workOrderId: string, prUrl: string): Promise<WorkOrder> {
     this.completed.push({ workOrderId, prUrl });
@@ -88,8 +97,9 @@ class FakeControlPlane implements ControlPlane {
 
 class RecordingClaude implements ClaudeCodeRunner {
   brief = "";
+  promptOutput = "{}";
   async runPrompt(_input: ClaudePromptInput): Promise<ClaudeGoalResult> {
-    throw new Error('not implemented in test fake');
+    return { exitCode: 0, stdout: this.promptOutput, stderr: "", costUsd: 0, tokensInput: 0, tokensOutput: 0 };
   }
   async runGoal(input: ClaudeGoalInput): Promise<ClaudeGoalResult> {
     this.brief = await readFile(input.briefPath, "utf8");
@@ -129,6 +139,29 @@ async function makeDeps(claudeCode: ClaudeCodeRunner) {
   return { deps, controlPlane, root };
 }
 
+function sampleExtractionTask(overrides: Partial<ExtractionTask> = {}): ExtractionTask {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    app_id: "22222222-2222-4222-8222-222222222222",
+    issue_id: "44444444-4444-4444-8444-444444444444",
+    decision_external_ref: "Q10",
+    raw_decision_title: "Rebate stacking rules",
+    raw_decision_body: null,
+    rewritten_subject: "Quick question",
+    rewritten_body: "Which option should we use?",
+    options_snapshot: [{ id: "pick_one", label: "Pick one" }, { id: "stack", label: "Stack" }],
+    raw_reply_text: "pick one",
+    recipient_email: "rylee@qep.com",
+    recipient_name: "Rylee",
+    claim_token: "55555555-5555-4555-8555-555555555555",
+    clarification_attempt_count: 0,
+    attempt_count: 1,
+    max_attempts: 3,
+    risk_class: "authorize",
+    ...overrides,
+  };
+}
+
 describe("executeWorkOrder", () => {
   test("runs the full happy path with mocked GitHub and mocked /goal", async () => {
     const claude = new RecordingClaude();
@@ -166,5 +199,60 @@ describe("executeWorkOrder", () => {
     expect(controlPlane.finishedRuns[0]?.status).toBe("failed");
     expect(controlPlane.audits.map((a) => a.eventType)).toContain("agent_failed");
     expect(existsSync(join(root, workOrder.id))).toBe(false);
+  });
+});
+
+describe("parseExtractionOutput", () => {
+  test("parses valid payload", () => {
+    const parsed = parseExtractionOutput('{"matched_option_id":"pick_one","confidence":0.91,"rationale":"clear","ask_clarifying_question":null,"signals":{"explicit_option_mention":true,"explicit_accept_decline":false,"multi_option_mention":false,"off_topic":false,"hedging_language":false}}', sampleExtractionTask());
+    expect(parsed.matched_option_id).toBe("pick_one");
+    expect(parsed.confidence).toBe(0.91);
+  });
+
+  test("handles malformed values and clamps confidence", () => {
+    const parsed = parseExtractionOutput('{"matched_option_id":"pick_one","confidence":7,"rationale":123,"ask_clarifying_question":"","signals":{}}', sampleExtractionTask());
+    expect(parsed.confidence).toBe(1);
+    expect(parsed.rationale).toBe("");
+  });
+
+  test("downgrades hallucinated option", () => {
+    const parsed = parseExtractionOutput('{"matched_option_id":"hallucinated","confidence":0.9,"rationale":"x","ask_clarifying_question":"?","signals":{"off_topic":false}}', sampleExtractionTask());
+    expect(parsed.matched_option_id).toBeNull();
+    expect(parsed._hallucinated_option).toBe(true);
+  });
+});
+
+describe("executeExtractionTask", () => {
+  test("routes high confidence to finishExtractionWithAnswer", async () => {
+    const cp = new FakeControlPlane();
+    const claude = new RecordingClaude();
+    claude.promptOutput = '{"matched_option_id":"pick_one","confidence":1,"rationale":"clear","ask_clarifying_question":null,"signals":{"explicit_option_mention":true,"explicit_accept_decline":false,"multi_option_mention":false,"off_topic":false,"hedging_language":false}}';
+    const result = await executeExtractionTask(sampleExtractionTask(), { controlPlane: cp, claudeCode: claude, logger: createLogger("runner-test") }, { runnerId: "mac", extractionAutoCommitConfidence: 0.85, extractionOffTopicFloor: 0.2 });
+    expect(result.status).toBe("succeeded");
+    expect(cp.extractionAnswered[0]?.optionId).toBe("pick_one");
+  });
+
+  test("routes low confidence with budget to clarify", async () => {
+    const cp = new FakeControlPlane();
+    const claude = new RecordingClaude();
+    claude.promptOutput = '{"matched_option_id":null,"confidence":0.5,"rationale":"ambiguous","ask_clarifying_question":"Which one?","signals":{"explicit_option_mention":false,"explicit_accept_decline":false,"multi_option_mention":false,"off_topic":false,"hedging_language":false}}';
+    await executeExtractionTask(sampleExtractionTask(), { controlPlane: cp, claudeCode: claude, logger: createLogger("runner-test") }, { runnerId: "mac", extractionAutoCommitConfidence: 1.01, extractionOffTopicFloor: 0.2 });
+    expect(cp.extractionClarified[0]?.sendId).toBeDefined();
+  });
+
+  test("routes exhausted budget to needs review", async () => {
+    const cp = new FakeControlPlane();
+    const claude = new RecordingClaude();
+    claude.promptOutput = '{"matched_option_id":null,"confidence":0.5,"rationale":"ambiguous","ask_clarifying_question":"Which one?","signals":{"explicit_option_mention":false,"explicit_accept_decline":false,"multi_option_mention":false,"off_topic":false,"hedging_language":false}}';
+    await executeExtractionTask(sampleExtractionTask({ clarification_attempt_count: 1 }), { controlPlane: cp, claudeCode: claude, logger: createLogger("runner-test") }, { runnerId: "mac", extractionAutoCommitConfidence: 1.01, extractionOffTopicFloor: 0.2 });
+    expect(cp.extractionReview[0]?.reason).toBe("budget_exhausted");
+  });
+
+  test("routes off-topic to needs review", async () => {
+    const cp = new FakeControlPlane();
+    const claude = new RecordingClaude();
+    claude.promptOutput = '{"matched_option_id":null,"confidence":0.1,"rationale":"thanks","ask_clarifying_question":null,"signals":{"explicit_option_mention":false,"explicit_accept_decline":false,"multi_option_mention":false,"off_topic":true,"hedging_language":false}}';
+    await executeExtractionTask(sampleExtractionTask(), { controlPlane: cp, claudeCode: claude, logger: createLogger("runner-test") }, { runnerId: "mac", extractionAutoCommitConfidence: 1.01, extractionOffTopicFloor: 0.2 });
+    expect(cp.extractionReview[0]?.reason).toBe("off_topic");
   });
 });

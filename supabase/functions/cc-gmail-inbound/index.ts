@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { asArray, asString, cleanString, cpAudit, cpGet, cpPatch, gmailAccessToken, isRecord, json } from "../_shared/phase5.ts";
+import { CP_URL, asArray, asString, cleanString, cpAudit, cpGet, cpHeaders, cpPatch, gmailAccessToken, isRecord, json } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-gmail-inbound";
 const PUBSUB_TOKEN = Deno.env.get("GMAIL_PUBSUB_VERIFICATION_TOKEN") ?? "";
@@ -39,17 +39,30 @@ Deno.serve(async (req) => {
       const sendId = cleanString(send.id, 80)!;
       const appId = cleanString(send.app_id, 80);
       const replyText = extractBody(msg);
-      const updated = await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(sent,delivered,opened,clicked,clarify_sent)`, {
-        state: "replied",
-        raw_reply_text: replyText,
-        replied_at: new Date().toISOString(),
-        gmail_thread_id: gmailThreadId ?? send.gmail_thread_id ?? null,
-      });
-      if (updated.length === 0) {
-        await cpAudit(appId, FUNCTION_NAME, "gmail_inbound_skipped_closed_send", { send_id: sendId, gmail_message_id: id });
-        continue;
+      try {
+        const updated = await cpPatch(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(sent,delivered,opened,clicked,clarify_sent)`, {
+          state: "replied",
+          raw_reply_text: replyText,
+          inbound_gmail_message_id: id,
+          inbound_received_at: new Date().toISOString(),
+          replied_at: new Date().toISOString(),
+          gmail_thread_id: gmailThreadId ?? send.gmail_thread_id ?? null,
+        });
+        if (updated.length === 0) {
+          await insertExtraReply(sendId, id, replyText);
+          await cpAudit(appId, FUNCTION_NAME, id === asString(send.inbound_gmail_message_id) ? "decision_inbound_already_processed" : "decision_extra_reply_received", { send_id: sendId, gmail_message_id: id });
+          continue;
+        }
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        if (detail.includes("cc_decision_email_sends_inbound_msg_idx") || detail.includes("duplicate key value")) {
+          await insertExtraReply(sendId, id, replyText);
+          await cpAudit(appId, FUNCTION_NAME, id === asString(send.inbound_gmail_message_id) ? "decision_inbound_already_processed" : "decision_extra_reply_received", { send_id: sendId, gmail_message_id: id });
+          continue;
+        }
+        throw e;
       }
-      await cpAudit(appId, `client:${from || "gmail"}`, "decision_reply_received", {
+      await cpAudit(appId, `client:${from || "gmail"}`, send.clarification_sent_at ? "decision_clarification_reply_received" : "decision_reply_received", {
         send_id: sendId,
         owner_name: send.recipient_name,
         owner_email: send.recipient_email,
@@ -135,7 +148,7 @@ async function findSend(ccSendId: string | null, inReplyTo: string | null, gmail
   }
   if (inReplyTo) {
     const encoded = encodeURIComponent(inReplyTo.split(/\s+/)[0] ?? inReplyTo);
-    const rows = await cpGet(`cc_decision_email_sends?gmail_message_id=eq.${encoded}&deleted_at=is.null&select=*`);
+    const rows = await cpGet(`cc_decision_email_sends?or=(gmail_message_id.eq.${encoded},clarification_gmail_message_id.eq.${encoded})&deleted_at=is.null&select=*`);
     const row = rows.find(isRecord);
     if (row && senderMatches(row, from)) return row;
   }
@@ -194,4 +207,17 @@ function decodeBase64Url(value: string): string {
 
 function stripQuoted(value: string): string {
   return value.split(/\nOn .+ wrote:\n|\nFrom: .+\n/i)[0].replace(/\n>.*$/gm, "").trim();
+}
+
+async function insertExtraReply(sendId: string, inboundMessageId: string, rawReplyText: string): Promise<void> {
+  const r = await fetch(`${CP_URL}/rest/v1/cc_decision_inbound_extra_replies?on_conflict=send_id,inbound_gmail_message_id`, {
+    method: "POST",
+    headers: { ...cpHeaders, Prefer: "return=minimal,resolution=ignore-duplicates" },
+    body: JSON.stringify({
+      send_id: sendId,
+      inbound_gmail_message_id: inboundMessageId,
+      raw_reply_text: rawReplyText,
+    }),
+  });
+  if (!r.ok) throw new Error(`control-plane INSERT cc_decision_inbound_extra_replies -> ${r.status} ${await r.text()}`);
 }

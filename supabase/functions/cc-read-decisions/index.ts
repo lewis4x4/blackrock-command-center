@@ -427,6 +427,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let apps: AppRecord[];
   let dpRows: DataPlaneRecord[];
   let answeredRecent: unknown[];
+  let pendingReviews: unknown[];
   let aggregateIssueByApp: Map<string, string> = new Map();
   try {
     const appPath = appId
@@ -436,7 +437,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawAggregateIssues, rawPendingReviews] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
@@ -444,9 +445,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
       appIdFilter
         ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&source_ref=eq.aggregate&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,created_at&order=created_at.desc`)
         : Promise.resolve([]),
+      appId
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
+        : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
+    pendingReviews = rawPendingReviews;
     // Map: app_id -> most recent aggregate open_decision cc_issues.id
     aggregateIssueByApp = new Map();
     for (const row of rawAggregateIssues.filter(isRecord)) {
@@ -478,12 +483,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const allDecisions = fanout.flatMap((result) => result.kind === "reached" ? result.decisions : []);
   const decisions = applyFilters(allDecisions, ownerFilter, maxAgeDays).slice(0, limit);
 
+  const appById = new Map(apps.map((app) => [app.app_id, app]));
   const payload = {
     apps_reached: appsReached,
     apps_unreachable: appsUnreachable,
     apps_unwired: appsUnwired,
     decisions,
     answered_recent: answeredRecent.map(answeredSummary),
+    pending_reviews: pendingReviews.filter(isRecord).map((row) => {
+      const app = appById.get(asString(row.app_id) ?? "");
+      return {
+        send_id: asString(row.id),
+        app_id: asString(row.app_id),
+        app_short_code: app?.app_short_code ?? null,
+        app_display_name: app?.app_display_name ?? null,
+        issue_id: asString(row.issue_id),
+        decision_external_ref: asString(row.decision_external_ref),
+        raw_decision_title: asString(row.raw_decision_title),
+        raw_decision_body: asString(row.raw_decision_body),
+        options_snapshot: Array.isArray(row.options_snapshot) ? row.options_snapshot : [],
+        recipient_id: asString(row.recipient_id),
+        recipient_name: asString(row.recipient_name),
+        recipient_email: asString(row.recipient_email),
+        replied_at: asString(row.replied_at),
+        raw_reply_text: asString(row.raw_reply_text),
+        llm_extraction: isRecord(row.llm_extraction) ? row.llm_extraction : null,
+        clarification_attempt_count: asNumber(row.clarification_attempt_count) ?? 0,
+        state: asString(row.state),
+      };
+    }),
     generated_at: new Date().toISOString(),
   };
 
@@ -497,6 +525,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         apps_unreachable: appsUnreachable.length,
         apps_unwired: appsUnwired.length,
         decisions: decisions.length,
+        pending_reviews: pendingReviews.length,
         filters: { app_id: appId, owner_kind: ownerFilter, max_age_days: maxAgeDays, limit },
       },
     });
