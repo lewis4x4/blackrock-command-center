@@ -10,6 +10,8 @@ import { AgentsView, type AgentsViewHandle } from './Agents';
 import { DecisionsView, type DecisionsViewHandle } from './Decisions';
 import { AppsView } from './Apps';
 import { SettingsView, type SettingsViewHandle } from './Settings';
+import { Workspace } from '@blackrock-ai/agent-core';
+import { tenantConfig } from './agent.config';
 
 /* Tiny hash switch until F1's router lands. Keeps Files link-shareable without adding react-router. */
 type LoadState = 'loading' | 'error' | 'ready';
@@ -20,6 +22,7 @@ function pageFromHash(): ShellPage {
   if (hash === '#/settings') return 'settings';
   if (hash === '#/agents') return 'agents';
   if (hash === '#/files') return 'files';
+  if (hash === '#/workspace') return 'workspace';
   const appMatch = hash.match(/^#\/apps\/([a-z0-9_-]+)$/i);
   if (appMatch?.[1]) return `app:${appMatch[1].toLowerCase()}`;
   if (hash === '#/apps') return 'apps';
@@ -32,6 +35,7 @@ function hashForPage(page: ShellPage): string {
   if (page === 'agents') return '#/agents';
   if (page === 'apps') return '#/apps';
   if (page === 'files') return '#/files';
+  if (page === 'workspace') return '#/workspace';
   if (page.startsWith('app:')) return `#/apps/${page.slice(4)}`;
   return '#/';
 }
@@ -117,6 +121,8 @@ export default function App() {
         <DecisionsView ref={decisionsRef} demo={INITIAL_DEMO} />
       ) : page === 'settings' ? (
         <SettingsView ref={settingsRef} demo={INITIAL_DEMO} />
+      ) : page === 'workspace' ? (
+        <Workspace config={tenantConfig} />
       ) : page === 'apps' ? (
         <>
           {loadState === 'loading' && <Loading />}

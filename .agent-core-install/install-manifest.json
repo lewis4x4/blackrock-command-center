@@ -1,0 +1,43 @@
+{
+  "installedAt": "2026-05-24T19:34:23Z",
+  "agentCoreSha": "fd379ce7b38658610b2a19e919268b81258e6cf7",
+  "agentCoreVersion": "0.1.0",
+  "targetRepo": "/Users/brianlewis/Projects/blackrock-command-center",
+  "tenantSlug": "blackrock",
+  "supabaseProjectRef": "gsvhuzpysxaegoecwjmf",
+  "targetWebDir": "web/src",
+  "migrationStyle": "sequential",
+  "schema": "agent_core",
+  "packages": {
+    "@blackrock-ai/agent-core": "0.1.0",
+    "@blackrock-ai/agent-runtime": "0.1.0",
+    "@blackrock-ai/agent-tools": "0.1.0",
+    "@blackrock-ai/agent-schema": "0.1.0"
+  },
+  "migrationsApplied": [
+    {
+      "from": "0001_agent_core.sql",
+      "to": "038_agent_core.sql"
+    },
+    {
+      "from": "0002_credential_resolution.sql",
+      "to": "039_credential_resolution.sql"
+    },
+    {
+      "from": "0003_artifacts_storage.sql",
+      "to": "040_artifacts_storage.sql"
+    },
+    {
+      "from": "0004_read_only_query_path.sql",
+      "to": "041_read_only_query_path.sql"
+    },
+    {
+      "from": "0005_run_lifecycle.sql",
+      "to": "042_run_lifecycle.sql"
+    },
+    {
+      "from": "0006_oauth_connections.sql",
+      "to": "043_oauth_connections.sql"
+    }
+  ]
+}

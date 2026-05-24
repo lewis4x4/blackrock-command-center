@@ -27,7 +27,7 @@ const chevron = (
 /* ============================================================================
    SHELL — left rail + topbar, wraps every view
    ============================================================================ */
-export type ShellPage = 'home' | 'decisions' | 'agents' | 'apps' | 'files' | 'settings' | `app:${string}`;
+export type ShellPage = 'home' | 'decisions' | 'agents' | 'apps' | 'files' | 'settings' | 'workspace' | `app:${string}`;
 
 export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children }: {
   demo: boolean;
@@ -73,8 +73,8 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
           </div>
         </div>
         <nav>
-          {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Settings'] as const).map((name) => {
-            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Apps' ? 'apps' : name === 'Files' ? 'files' : 'settings';
+          {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Workspace', 'Settings'] as const).map((name) => {
+            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Apps' ? 'apps' : name === 'Files' ? 'files' : name === 'Workspace' ? 'workspace' : 'settings';
             const active = page === activePage;
             return (
               <button
@@ -99,7 +99,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
       <div className="main">
         <div className="topbar">
           <div className="topbar-inner">
-          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'apps' ? 'Apps' : activePage === 'settings' ? 'Settings' : activePage === 'decisions' ? 'Decisions' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
+          <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'apps' ? 'Apps' : activePage === 'settings' ? 'Settings' : activePage === 'decisions' ? 'Decisions' : activePage === 'workspace' ? 'Workspace' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
               <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />

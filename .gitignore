@@ -23,3 +23,6 @@ dist/
 
 # Local Netlify folder
 .netlify
+
+# Supabase CLI scratch in the web/ sub-supabase dir
+web/supabase/.temp/

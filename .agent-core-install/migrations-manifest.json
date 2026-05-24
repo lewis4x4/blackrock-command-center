@@ -1,0 +1,72 @@
+{
+  "style": "sequential",
+  "sourceDir": "/Users/brianlewis/blackrock-agent-core/packages/schema/migrations",
+  "targetDir": "/Users/brianlewis/Projects/blackrock-command-center/supabase/migrations",
+  "liveCount": 37,
+  "liveVersions": [
+    "001",
+    "002",
+    "003",
+    "004",
+    "005",
+    "006",
+    "007",
+    "008",
+    "009",
+    "010",
+    "011",
+    "012",
+    "013",
+    "014",
+    "015",
+    "016",
+    "017",
+    "018",
+    "019",
+    "020",
+    "021",
+    "022",
+    "023",
+    "024",
+    "025",
+    "026",
+    "027",
+    "028",
+    "029",
+    "030",
+    "031",
+    "032",
+    "033",
+    "034",
+    "035",
+    "036",
+    "037"
+  ],
+  "unreconciled": false,
+  "mappings": [
+    {
+      "from": "0001_agent_core.sql",
+      "to": "038_agent_core.sql"
+    },
+    {
+      "from": "0002_credential_resolution.sql",
+      "to": "039_credential_resolution.sql"
+    },
+    {
+      "from": "0003_artifacts_storage.sql",
+      "to": "040_artifacts_storage.sql"
+    },
+    {
+      "from": "0004_read_only_query_path.sql",
+      "to": "041_read_only_query_path.sql"
+    },
+    {
+      "from": "0005_run_lifecycle.sql",
+      "to": "042_run_lifecycle.sql"
+    },
+    {
+      "from": "0006_oauth_connections.sql",
+      "to": "043_oauth_connections.sql"
+    }
+  ]
+}
