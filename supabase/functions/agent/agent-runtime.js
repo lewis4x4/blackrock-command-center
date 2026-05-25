@@ -21037,10 +21037,7 @@ async function refreshTokens(connection, provider) {
     signal: AbortSignal.timeout(3e4)
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      `${provider}: refresh failed ${res.status}: ${text.slice(0, 400)}`
-    );
+    throw new Error(`${provider}: refresh failed (status ${res.status})`);
   }
   const payload = await res.json();
   const newAccess = typeof payload.access_token === "string" ? payload.access_token : "";
@@ -21059,7 +21056,7 @@ async function refreshTokens(connection, provider) {
   });
   if (error) {
     throw new Error(
-      `${provider}: failed to persist refreshed tokens: ${error.message}`
+      `${provider}: failed to persist refreshed tokens (status ${error.code ?? "unknown"})`
     );
   }
   return newAccess;
@@ -21871,10 +21868,51 @@ async function finalizeRun(input) {
   }
 }
 
+// src/auth.ts
+function decodeJwtClaimsFromAuthHeader(authHeader) {
+  if (!authHeader) return null;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  const token = match[1]?.trim();
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  const payload = parts[1];
+  if (!payload) return null;
+  try {
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + (4 - normalized.length % 4) % 4, "=");
+    const decoded = atob(padded);
+    const parsed = JSON.parse(decoded);
+    return {
+      tenant_id: typeof parsed.tenant_id === "string" ? parsed.tenant_id : void 0,
+      role: typeof parsed.role === "string" ? parsed.role : void 0,
+      sub: typeof parsed.sub === "string" ? parsed.sub : void 0,
+      admin_role: typeof parsed.admin_role === "string" ? parsed.admin_role : void 0
+    };
+  } catch {
+    return null;
+  }
+}
+function authorizeRuntimeTenant(bodyTenantId, headers) {
+  const claims = decodeJwtClaimsFromAuthHeader(headers.get("authorization")) ?? {};
+  if (claims.role === "service_role") {
+    const impersonatedTenant = headers.get("x-agent-core-impersonate-tenant")?.trim();
+    return { ok: true, tenantId: impersonatedTenant || bodyTenantId, claims };
+  }
+  if (!claims.tenant_id) {
+    return { ok: false, status: 401, error: "missing tenant_id claim" };
+  }
+  if (claims.tenant_id !== bodyTenantId) {
+    return { ok: false, status: 403, error: "forbidden: tenant mismatch" };
+  }
+  return { ok: true, tenantId: bodyTenantId, claims };
+}
+
 // src/handler.ts
 var CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "authorization, content-type",
+  "access-control-allow-headers": "authorization, content-type, x-agent-core-impersonate-tenant",
   "access-control-allow-methods": "POST, OPTIONS"
 };
 var SSE_HEADERS = {
@@ -21920,15 +21958,33 @@ function createAgentHandler(opts = {}) {
     let message;
     let model = "";
     try {
-      const body = await req.json();
-      tenantId = body?.tenantId;
-      message = body?.message;
-      model = body?.model ?? "";
-      if (!tenantId || !message) {
-        return jsonResponse(
-          { error: "tenantId and message are required" },
-          400
-        );
+      const rawBody = await req.arrayBuffer();
+      if (rawBody.byteLength > 256 * 1024) {
+        return jsonResponse({ error: "payload too large" }, 413);
+      }
+      const parsed = JSON.parse(new TextDecoder().decode(rawBody));
+      const bodyTenantId = typeof parsed.tenantId === "string" ? parsed.tenantId : "";
+      if (!bodyTenantId) {
+        return jsonResponse({ error: "tenantId and message are required" }, 400);
+      }
+      if (typeof parsed.message !== "string") {
+        return jsonResponse({ error: "message must be a string" }, 400);
+      }
+      message = parsed.message;
+      if (parsed.model !== void 0 && typeof parsed.model !== "string") {
+        return jsonResponse({ error: "model must be a string" }, 400);
+      }
+      model = typeof parsed.model === "string" ? parsed.model : "";
+      const tenantAuth = authorizeRuntimeTenant(bodyTenantId, req.headers);
+      if (!tenantAuth.ok) {
+        return jsonResponse({ error: tenantAuth.error }, tenantAuth.status);
+      }
+      tenantId = tenantAuth.tenantId;
+      if (message.length > 1e5) {
+        return jsonResponse({ error: "message too long" }, 400);
+      }
+      if (model.length > 64) {
+        return jsonResponse({ error: "model too long" }, 400);
       }
     } catch {
       return jsonResponse({ error: "invalid JSON body" }, 400);
@@ -22048,7 +22104,7 @@ Verifier feedback to address: ${verdict.notes}`,
         } catch (e) {
           console.error("agent-handler error:", e);
           runStatus = "failed";
-          runError = e instanceof Error ? e.message : String(e);
+          runError = redactSecrets(e instanceof Error ? e.message : String(e));
           emit({ type: "error", message: "internal error" });
         } finally {
           await finalizeRun({
@@ -22069,6 +22125,9 @@ Verifier feedback to address: ${verdict.notes}`,
     });
     return new Response(stream, { headers: SSE_HEADERS });
   };
+}
+function redactSecrets(s) {
+  return s.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED_API_KEY]").replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]").replace(/access_token/gi, "[REDACTED_TOKEN]").replace(/refresh_token/gi, "[REDACTED_TOKEN]").slice(0, 500);
 }
 function jsonResponse(body, status) {
   return new Response(JSON.stringify(body), {
@@ -22205,10 +22264,12 @@ function base64urlEncode(bytes) {
 export {
   AGENT_CORE_SCHEMA2 as AGENT_CORE_SCHEMA,
   OAUTH_PROVIDERS,
+  authorizeRuntimeTenant,
   buildAuthorizeUrl,
   callModel,
   createAgentHandler,
   critique,
+  decodeJwtClaimsFromAuthHeader,
   exchangeCode,
   execute,
   finalizeRun,
