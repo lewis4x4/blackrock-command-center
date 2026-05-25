@@ -20771,7 +20771,7 @@ var MAX_COUNT = 20;
 var webSearch = {
   key: "web_search",
   description: "Search the public web. Input: { query: string, count?: number }. Returns up to `count` results with { title, url, snippet }.",
-  async run(rawInput) {
+  async run(rawInput, ctx) {
     const input = rawInput;
     const query = String(input?.query ?? "").trim();
     if (!query) throw new Error("web_search requires a non-empty query");
@@ -20819,6 +20819,7 @@ var webSearch = {
       };
     }) : [];
     const output = { query, results };
+    ctx.meter?.({ units: 1 });
     return output;
   }
 };
@@ -21314,29 +21315,6 @@ var builtins = [
 ];
 
 // src/model.ts
-var PRICE_PER_TOKEN = {
-  // Anthropic — Claude 4.x families.
-  "claude-opus-4-7": { input: 15 / 1e6, output: 75 / 1e6 },
-  "claude-opus-4-6": { input: 15 / 1e6, output: 75 / 1e6 },
-  "claude-sonnet-4-6": { input: 3 / 1e6, output: 15 / 1e6 },
-  "claude-sonnet-4-5": { input: 3 / 1e6, output: 15 / 1e6 },
-  "claude-haiku-4-5": { input: 0.8 / 1e6, output: 4 / 1e6 },
-  // OpenAI — common families.
-  "gpt-4o": { input: 5 / 1e6, output: 15 / 1e6 },
-  "gpt-4o-mini": { input: 0.15 / 1e6, output: 0.6 / 1e6 },
-  "o1": { input: 15 / 1e6, output: 60 / 1e6 },
-  "o1-mini": { input: 3 / 1e6, output: 12 / 1e6 },
-  "o3": { input: 60 / 1e6, output: 240 / 1e6 }
-};
-function estimateCost(model, tokensIn, tokensOut) {
-  let bestKey = "";
-  for (const key of Object.keys(PRICE_PER_TOKEN)) {
-    if (model.startsWith(key) && key.length > bestKey.length) bestKey = key;
-  }
-  const row = bestKey ? PRICE_PER_TOKEN[bestKey] : void 0;
-  if (!row) return 0;
-  return tokensIn * row.input + tokensOut * row.output;
-}
 async function callModel(opts) {
   if (opts.provider === "anthropic") {
     const res2 = await fetch("https://api.anthropic.com/v1/messages", {
@@ -21358,11 +21336,16 @@ async function callModel(opts) {
     const text2 = (data2.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
     const tokensIn2 = numberOr(data2?.usage?.input_tokens, 0);
     const tokensOut2 = numberOr(data2?.usage?.output_tokens, 0);
+    const tokensCachedRead = numberOr(data2?.usage?.cache_read_input_tokens, 0);
+    const tokensCachedWrite = numberOr(data2?.usage?.cache_creation_input_tokens, 0);
     return {
       text: text2,
       tokensIn: tokensIn2,
       tokensOut: tokensOut2,
-      cost: estimateCost(opts.model, tokensIn2, tokensOut2)
+      tokensCachedRead,
+      tokensCachedWrite,
+      finishReason: typeof data2?.stop_reason === "string" ? data2.stop_reason : void 0,
+      providerMetadata: { usage: data2?.usage ?? null, id: data2?.id ?? null }
     };
   }
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -21388,7 +21371,10 @@ async function callModel(opts) {
     text,
     tokensIn,
     tokensOut,
-    cost: estimateCost(opts.model, tokensIn, tokensOut)
+    tokensCachedRead: 0,
+    tokensCachedWrite: 0,
+    finishReason: typeof data?.choices?.[0]?.finish_reason === "string" ? data.choices[0].finish_reason : void 0,
+    providerMetadata: { usage: data?.usage ?? null, id: data?.id ?? null }
   };
 }
 function numberOr(value, fallback) {
@@ -21427,7 +21413,9 @@ async function plan(ctx, message) {
       usage: {
         tokensIn: call.tokensIn,
         tokensOut: call.tokensOut,
-        cost: call.cost
+        tokensCachedRead: call.tokensCachedRead ?? 0,
+        tokensCachedWrite: call.tokensCachedWrite ?? 0,
+        cost: 0
       }
     };
   } catch {
@@ -21452,17 +21440,18 @@ async function execute(ctx, graph, opts = {}) {
     }
   } : null;
   while (remaining.length) {
-    const ready = remaining.filter(
-      (t) => (t.dependsOn ?? []).every((d) => done.has(d))
-    );
+    const ready = remaining.filter((t) => (t.dependsOn ?? []).every((d) => done.has(d)));
     if (ready.length === 0) {
       for (const t of remaining) {
+        const now = /* @__PURE__ */ new Date();
         const result = {
           taskId: t.id,
           tool: t.tool,
           ok: false,
           output: null,
-          error: "unresolved or cyclic dependency"
+          error: "unresolved or cyclic dependency",
+          startedAt: now,
+          finishedAt: now
         };
         done.set(t.id, result);
         if (emit) {
@@ -21490,18 +21479,42 @@ async function execute(ctx, graph, opts = {}) {
     }
     const wave = await Promise.all(
       ready.map(async (t) => {
+        const startedAt = /* @__PURE__ */ new Date();
+        let externalUnits;
+        let externalCostUsd;
         try {
           const output = await ctx.registry.run(t.tool, t.input, {
-            tenantId: ctx.tenantId
+            tenantId: ctx.tenantId,
+            meter: (input) => {
+              if (typeof input.units === "number" && Number.isFinite(input.units)) {
+                externalUnits = (externalUnits ?? 0) + input.units;
+              }
+              if (typeof input.costUsd === "number" && Number.isFinite(input.costUsd)) {
+                externalCostUsd = (externalCostUsd ?? 0) + input.costUsd;
+              }
+            }
           });
-          return { taskId: t.id, tool: t.tool, ok: true, output };
+          return {
+            taskId: t.id,
+            tool: t.tool,
+            ok: true,
+            output,
+            startedAt,
+            finishedAt: /* @__PURE__ */ new Date(),
+            externalUnits,
+            externalCostUsd
+          };
         } catch (e) {
           return {
             taskId: t.id,
             tool: t.tool,
             ok: false,
             output: null,
-            error: String(e)
+            error: String(e),
+            startedAt,
+            finishedAt: /* @__PURE__ */ new Date(),
+            externalUnits,
+            externalCostUsd
           };
         }
       })
@@ -21531,7 +21544,9 @@ async function execute(ctx, graph, opts = {}) {
       tool: t.tool,
       ok: false,
       output: null,
-      error: "not executed"
+      error: "not executed",
+      startedAt: /* @__PURE__ */ new Date(),
+      finishedAt: /* @__PURE__ */ new Date()
     }
   );
 }
@@ -21563,7 +21578,9 @@ Write the answer.`;
     usage: {
       tokensIn: call.tokensIn,
       tokensOut: call.tokensOut,
-      cost: call.cost
+      tokensCachedRead: call.tokensCachedRead ?? 0,
+      tokensCachedWrite: call.tokensCachedWrite ?? 0,
+      cost: 0
     }
   };
 }
@@ -21598,7 +21615,9 @@ ${draft}`;
       usage: {
         tokensIn: call.tokensIn,
         tokensOut: call.tokensOut,
-        cost: call.cost
+        tokensCachedRead: call.tokensCachedRead ?? 0,
+        tokensCachedWrite: call.tokensCachedWrite ?? 0,
+        cost: 0
       }
     };
   } catch {
@@ -21791,7 +21810,8 @@ async function recordRunStart(input) {
       tenant_id: input.tenantId,
       model: input.model,
       model_provider: input.modelProvider,
-      status: "running"
+      status: "running",
+      user_id: input.userId ?? null
     });
     if (runErr) {
       console.error("persistence: recordRunStart agent_runs insert failed:", runErr);
@@ -21999,6 +22019,116 @@ async function loadQuotaState(supabase, tenantId) {
   }
 }
 
+// src/metering.ts
+var priceCache = /* @__PURE__ */ new Map();
+function toNumber2(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+async function getCurrentPrice(supabase, provider, model, atIso) {
+  const key = `${provider}:${model}`;
+  if (priceCache.has(key)) return priceCache.get(key) ?? null;
+  const { data, error } = await supabase.from("model_prices").select("input_per_million_usd,output_per_million_usd,cache_read_per_million_usd,cache_write_per_million_usd").eq("provider", provider).eq("model", model).lte("effective_from", atIso).or(`effective_to.is.null,effective_to.gt.${atIso}`).order("effective_from", { ascending: false }).limit(1).maybeSingle();
+  if (error || !data) {
+    priceCache.set(key, null);
+    return null;
+  }
+  const row = {
+    input_per_million_usd: toNumber2(data.input_per_million_usd),
+    output_per_million_usd: toNumber2(data.output_per_million_usd),
+    cache_read_per_million_usd: data.cache_read_per_million_usd == null ? null : toNumber2(data.cache_read_per_million_usd),
+    cache_write_per_million_usd: data.cache_write_per_million_usd == null ? null : toNumber2(data.cache_write_per_million_usd)
+  };
+  priceCache.set(key, row);
+  return row;
+}
+async function computeCost(supabase, input) {
+  const atIso = (input.at ?? /* @__PURE__ */ new Date()).toISOString();
+  const tokensCachedRead = input.tokensCachedRead ?? 0;
+  const tokensCachedWrite = input.tokensCachedWrite ?? 0;
+  try {
+    const row = await getCurrentPrice(supabase, input.provider, input.model, atIso);
+    if (row) {
+      const inputCost = input.tokensIn * row.input_per_million_usd / 1e6;
+      const outputCost = input.tokensOut * row.output_per_million_usd / 1e6;
+      const cacheRead = tokensCachedRead * (row.cache_read_per_million_usd ?? 0) / 1e6;
+      const cacheWrite = tokensCachedWrite * (row.cache_write_per_million_usd ?? 0) / 1e6;
+      const costUsd2 = Number((inputCost + outputCost + cacheRead + cacheWrite).toFixed(6));
+      return { costUsd: costUsd2, breakdown: { input: inputCost, output: outputCost, cacheRead, cacheWrite } };
+    }
+    const rpc = await supabase.rpc("compute_cost", {
+      p_provider: input.provider,
+      p_model: input.model,
+      p_at: atIso,
+      p_tokens_in: input.tokensIn,
+      p_tokens_out: input.tokensOut,
+      p_cached_read: tokensCachedRead,
+      p_cached_write: tokensCachedWrite
+    });
+    if (rpc.error) throw rpc.error;
+    const costUsd = toNumber2(rpc.data);
+    if (costUsd === 0) {
+      console.warn("metering: compute_cost returned zero", {
+        provider: input.provider,
+        model: input.model
+      });
+    }
+    return { costUsd, breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  } catch (e) {
+    console.warn("metering: computeCost failed; defaulting to zero", e);
+    return { costUsd: 0, breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  }
+}
+async function recordLlmCall(supabase, args) {
+  const cost = await computeCost(supabase, {
+    provider: args.provider,
+    model: args.model,
+    tokensIn: args.tokensIn,
+    tokensOut: args.tokensOut,
+    tokensCachedRead: args.tokensCachedRead ?? 0,
+    tokensCachedWrite: args.tokensCachedWrite ?? 0,
+    at: args.finishedAt
+  });
+  const { error } = await supabase.from("run_llm_calls").insert({
+    run_id: args.runId,
+    tenant_id: args.tenantId,
+    step_label: args.stepLabel,
+    provider: args.provider,
+    model: args.model,
+    tokens_in: args.tokensIn,
+    tokens_out: args.tokensOut,
+    tokens_cached_read: args.tokensCachedRead ?? 0,
+    tokens_cached_write: args.tokensCachedWrite ?? 0,
+    cost_usd: cost.costUsd,
+    started_at: args.startedAt.toISOString(),
+    finished_at: args.finishedAt.toISOString(),
+    error: args.error ?? null
+  });
+  if (error) {
+    console.warn("metering: recordLlmCall insert failed", error);
+  }
+}
+async function recordToolInvocation(supabase, args) {
+  const { error } = await supabase.from("tool_invocations").insert({
+    run_id: args.runId,
+    tenant_id: args.tenantId,
+    tool_key: args.toolKey,
+    started_at: args.startedAt.toISOString(),
+    finished_at: args.finishedAt.toISOString(),
+    external_units: args.externalUnits ?? null,
+    external_cost_estimate_usd: args.externalCostUsd ?? null,
+    ok: args.ok,
+    error: args.error ?? null
+  });
+  if (error) {
+    console.warn("metering: recordToolInvocation insert failed", error);
+  }
+}
+
 // src/handler.ts
 var CORS = {
   "access-control-allow-origin": "*",
@@ -22104,6 +22234,8 @@ function createAgentHandler(opts = {}) {
     }
     const supabase = getServiceSupabase();
     const claims = decodeJwtClaimsFromAuthHeader(req.headers.get("authorization"));
+    const isImpersonated = !!req.headers.get("x-agent-core-impersonate-tenant");
+    const userId = isImpersonated ? null : claims?.sub ?? null;
     const subjectTenant = `tenant:${tenantId}`;
     const subjectUser = `user:${claims?.sub ?? "unknown"}`;
     const subjectIp = `ip:${firstForwardedIp(req)}`;
@@ -22182,6 +22314,7 @@ function createAgentHandler(opts = {}) {
             tenantId,
             model: ctx.model,
             modelProvider: ctx.modelProvider,
+            userId,
             userMessage: message
           });
           const failBudget = (reason) => {
@@ -22197,15 +22330,46 @@ function createAgentHandler(opts = {}) {
             if (cost > RUN_BUDGET.MAX_COST_PER_RUN_USD) return failBudget("run budget: cost cap exceeded");
             return true;
           };
-          const addUsage = (u) => {
+          const addUsage = async (stepLabel, u, startedAt, finishedAt, error) => {
+            const tokensCachedRead = u.tokensCachedRead ?? 0;
+            const tokensCachedWrite = u.tokensCachedWrite ?? 0;
+            let stepCost = 0;
+            if (supabase) {
+              const calc = await computeCost(supabase, {
+                provider: ctx.modelProvider,
+                model: ctx.model,
+                tokensIn: u.tokensIn,
+                tokensOut: u.tokensOut,
+                tokensCachedRead,
+                tokensCachedWrite,
+                at: finishedAt
+              });
+              stepCost = calc.costUsd;
+              await recordLlmCall(supabase, {
+                runId,
+                tenantId,
+                stepLabel,
+                provider: ctx.modelProvider,
+                model: ctx.model,
+                tokensIn: u.tokensIn,
+                tokensOut: u.tokensOut,
+                tokensCachedRead,
+                tokensCachedWrite,
+                startedAt,
+                finishedAt,
+                error
+              });
+            }
             tokensIn += u.tokensIn;
             tokensOut += u.tokensOut;
-            cost += u.cost;
+            cost += stepCost;
             return checkBudget();
           };
           if (!checkBudget()) return;
+          const plannedStartedAt = /* @__PURE__ */ new Date();
           const planned = await planner(ctx, message);
-          if (!addUsage(planned.usage)) return;
+          const plannedFinishedAt = /* @__PURE__ */ new Date();
+          if (!await addUsage("planner", planned.usage, plannedStartedAt, plannedFinishedAt)) return;
           let graph = planned.graph;
           if (graph.tasks.length > RUN_BUDGET.MAX_TASKS_PER_GRAPH) {
             graph = { ...graph, tasks: graph.tasks.slice(0, RUN_BUDGET.MAX_TASKS_PER_GRAPH) };
@@ -22228,18 +22392,39 @@ function createAgentHandler(opts = {}) {
           });
           if (runStatus === "failed") return;
           await persistToolResults(runId, tenantId, results);
+          if (supabase) {
+            for (const r of results) {
+              await recordToolInvocation(supabase, {
+                runId,
+                tenantId,
+                toolKey: r.tool,
+                startedAt: r.startedAt ?? /* @__PURE__ */ new Date(),
+                finishedAt: r.finishedAt ?? /* @__PURE__ */ new Date(),
+                externalUnits: r.externalUnits,
+                externalCostUsd: r.externalCostUsd,
+                ok: r.ok,
+                error: r.error
+              });
+            }
+          }
+          const draftedStartedAt = /* @__PURE__ */ new Date();
           const drafted = await synthesizer(ctx, message, results);
-          if (!addUsage(drafted.usage)) return;
+          const draftedFinishedAt = /* @__PURE__ */ new Date();
+          if (!await addUsage("synthesizer", drafted.usage, draftedStartedAt, draftedFinishedAt)) return;
           let answer = drafted.text;
           emit({ type: "answer", text: answer });
+          const verdictStartedAt = /* @__PURE__ */ new Date();
           const verdict = await critic(ctx, message, answer, results);
-          if (!addUsage(verdict.usage)) return;
+          const verdictFinishedAt = /* @__PURE__ */ new Date();
+          if (!await addUsage("critic", verdict.usage, verdictStartedAt, verdictFinishedAt)) return;
           emit({ type: "critic", ok: verdict.ok, notes: verdict.notes });
           if (!verdict.ok) {
+            const correctedStartedAt = /* @__PURE__ */ new Date();
             const corrected = await synthesizer(ctx, `${message}
 
 Verifier feedback to address: ${verdict.notes}`, results);
-            if (!addUsage(corrected.usage)) return;
+            const correctedFinishedAt = /* @__PURE__ */ new Date();
+            if (!await addUsage("synthesizer", corrected.usage, correctedStartedAt, correctedFinishedAt)) return;
             answer = corrected.text;
             emit({ type: "answer", text: answer });
           }
@@ -22432,6 +22617,7 @@ export {
   buildAuthorizeUrl,
   callModel,
   checkRateLimit,
+  computeCost,
   createAgentHandler,
   critique,
   decodeJwtClaimsFromAuthHeader,
@@ -22447,8 +22633,10 @@ export {
   parseSseChunk,
   parseSseFrame,
   plan,
+  recordLlmCall,
   recordMessage,
   recordRunStart,
+  recordToolInvocation,
   recordToolResults,
   refreshAccessToken,
   synthesize
