@@ -21520,6 +21520,10 @@ async function execute(ctx, graph, opts = {}) {
       }
     }
     for (const t of ready) remaining.splice(remaining.indexOf(t), 1);
+    if (opts.onWaveComplete) {
+      const shouldContinue = await opts.onWaveComplete(done.size);
+      if (shouldContinue === false) break;
+    }
   }
   return graph.tasks.map(
     (t) => done.get(t.id) ?? {
@@ -21915,6 +21919,13 @@ var CORS = {
   "access-control-allow-headers": "authorization, content-type, x-agent-core-impersonate-tenant",
   "access-control-allow-methods": "POST, OPTIONS"
 };
+var RUN_BUDGET = {
+  MAX_TASKS_PER_GRAPH: 20,
+  MAX_TOOL_CALLS_PER_RUN: 30,
+  MAX_TOKENS_PER_RUN: 1e5,
+  MAX_COST_PER_RUN_USD: 1,
+  MAX_RUN_WALL_TIME_MS: 45e3
+};
 var SSE_HEADERS = {
   ...CORS,
   "content-type": "text/event-stream; charset=utf-8",
@@ -21951,6 +21962,14 @@ function randomRunId() {
 function createAgentHandler(opts = {}) {
   const customLoad = opts.loadTenantContext;
   const registry = opts.registry ?? defaultRegistry();
+  const planner = opts.planner ?? plan;
+  const executor = opts.executor ?? execute;
+  const synthesizer = opts.synthesizer ?? synthesize;
+  const critic = opts.critic ?? critique;
+  const persistRunStart = opts.recordRunStart ?? recordRunStart;
+  const persistMessage = opts.recordMessage ?? recordMessage;
+  const persistToolResults = opts.recordToolResults ?? recordToolResults;
+  const persistFinalizeRun = opts.finalizeRun ?? finalizeRun;
   return async (req) => {
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (req.method !== "POST") return jsonResponse({ error: "POST only" }, 405);
@@ -22001,6 +22020,8 @@ function createAgentHandler(opts = {}) {
         let tokensIn = 0;
         let tokensOut = 0;
         let cost = 0;
+        let toolCallCount = 0;
+        const runStartedAt = Date.now();
         let finalGraph;
         let runStatus = "failed";
         let runError;
@@ -22016,49 +22037,95 @@ function createAgentHandler(opts = {}) {
           } else {
             ctx = await loadTenantContext(tenantId, model);
           }
-          await recordRunStart({
+          await persistRunStart({
             runId,
             tenantId,
             model: ctx.model,
             modelProvider: ctx.modelProvider,
             userMessage: message
           });
+          const failBudget = (message2) => {
+            runStatus = "failed";
+            runError = message2;
+            emit({ type: "error", message: message2 });
+            return false;
+          };
+          const checkBudget = (_reason) => {
+            if (Date.now() - runStartedAt > RUN_BUDGET.MAX_RUN_WALL_TIME_MS) {
+              return failBudget("run budget: wall time exceeded");
+            }
+            if (toolCallCount > RUN_BUDGET.MAX_TOOL_CALLS_PER_RUN) {
+              return failBudget("run budget: too many tool calls");
+            }
+            if (tokensIn + tokensOut > RUN_BUDGET.MAX_TOKENS_PER_RUN) {
+              return failBudget("run budget: token cap exceeded");
+            }
+            if (cost > RUN_BUDGET.MAX_COST_PER_RUN_USD) {
+              return failBudget("run budget: cost cap exceeded");
+            }
+            return true;
+          };
           const addUsage = (u) => {
             tokensIn += u.tokensIn;
             tokensOut += u.tokensOut;
             cost += u.cost;
+            return checkBudget("add_usage");
           };
-          const planned = await plan(ctx, message);
-          addUsage(planned.usage);
-          const graph = planned.graph;
+          if (!checkBudget("before_planner")) return;
+          const planned = await planner(ctx, message);
+          if (!addUsage(planned.usage)) return;
+          let graph = planned.graph;
+          const plannedTaskCount = planned.graph.tasks.length;
+          if (plannedTaskCount > RUN_BUDGET.MAX_TASKS_PER_GRAPH) {
+            graph = {
+              ...planned.graph,
+              tasks: planned.graph.tasks.slice(0, RUN_BUDGET.MAX_TASKS_PER_GRAPH)
+            };
+            emit({
+              type: "plan_truncated",
+              original: plannedTaskCount,
+              kept: RUN_BUDGET.MAX_TASKS_PER_GRAPH
+            });
+          }
           finalGraph = graph;
           emit({ type: "plan", graph });
-          await recordMessage({
+          await persistMessage({
             runId,
             tenantId,
             role: "assistant",
             content: { kind: "plan", graph, usage: planned.usage }
           });
-          const results = await execute(ctx, graph, { onEvent: emit });
-          await recordToolResults(runId, tenantId, results);
-          const drafted = await synthesize(ctx, message, results);
-          addUsage(drafted.usage);
+          if (!checkBudget("before_execute")) return;
+          const results = await executor(ctx, graph, {
+            onEvent: emit,
+            onWaveComplete: (completedCount) => {
+              toolCallCount = completedCount;
+              return checkBudget("tool_wave");
+            }
+          });
+          if (runStatus === "failed") return;
+          if (!checkBudget("after_execute")) return;
+          await persistToolResults(runId, tenantId, results);
+          if (!checkBudget("before_synthesize")) return;
+          const drafted = await synthesizer(ctx, message, results);
+          if (!addUsage(drafted.usage)) return;
           let answer = drafted.text;
           emit({ type: "answer", text: answer });
-          await recordMessage({
+          await persistMessage({
             runId,
             tenantId,
             role: "assistant",
             content: { kind: "draft_answer", text: answer, usage: drafted.usage }
           });
-          const verdict = await critique(ctx, message, answer, results);
-          addUsage(verdict.usage);
+          if (!checkBudget("before_critic")) return;
+          const verdict = await critic(ctx, message, answer, results);
+          if (!addUsage(verdict.usage)) return;
           emit({
             type: "critic",
             ok: verdict.ok,
             notes: verdict.notes
           });
-          await recordMessage({
+          await persistMessage({
             runId,
             tenantId,
             role: "assistant",
@@ -22070,17 +22137,18 @@ function createAgentHandler(opts = {}) {
             }
           });
           if (!verdict.ok) {
-            const corrected = await synthesize(
+            if (!checkBudget("before_corrective_synthesize")) return;
+            const corrected = await synthesizer(
               ctx,
               `${message}
 
 Verifier feedback to address: ${verdict.notes}`,
               results
             );
-            addUsage(corrected.usage);
+            if (!addUsage(corrected.usage)) return;
             answer = corrected.text;
             emit({ type: "answer", text: answer });
-            await recordMessage({
+            await persistMessage({
               runId,
               tenantId,
               role: "assistant",
@@ -22099,7 +22167,16 @@ Verifier feedback to address: ${verdict.notes}`,
             results,
             usage: { tokensIn, tokensOut, cost }
           };
-          emit({ type: "final", result });
+          emit({
+            type: "final",
+            result,
+            budget_used: {
+              tokens: tokensIn + tokensOut,
+              cost,
+              tool_calls: toolCallCount,
+              duration_ms: Date.now() - runStartedAt
+            }
+          });
           runStatus = "completed";
         } catch (e) {
           console.error("agent-handler error:", e);
@@ -22107,7 +22184,7 @@ Verifier feedback to address: ${verdict.notes}`,
           runError = redactSecrets(e instanceof Error ? e.message : String(e));
           emit({ type: "error", message: "internal error" });
         } finally {
-          await finalizeRun({
+          await persistFinalizeRun({
             runId,
             tenantId,
             status: runStatus,
@@ -22264,6 +22341,7 @@ function base64urlEncode(bytes) {
 export {
   AGENT_CORE_SCHEMA2 as AGENT_CORE_SCHEMA,
   OAUTH_PROVIDERS,
+  RUN_BUDGET,
   authorizeRuntimeTenant,
   buildAuthorizeUrl,
   callModel,
