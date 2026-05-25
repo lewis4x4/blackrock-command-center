@@ -21913,10 +21913,96 @@ function authorizeRuntimeTenant(bodyTenantId, headers) {
   return { ok: true, tenantId: bodyTenantId, claims };
 }
 
+// src/rate-limiter.ts
+function currentWindowStartSecs(windowSecs) {
+  const nowSecs = Math.floor(Date.now() / 1e3);
+  return nowSecs - nowSecs % windowSecs;
+}
+async function checkRateLimit(ctx) {
+  try {
+    const { data, error } = await ctx.supabase.rpc("check_rate_limit", {
+      p_tenant: ctx.tenantId,
+      p_subject: ctx.subject,
+      p_window_secs: ctx.windowSecs,
+      p_limit: ctx.limit
+    });
+    if (error) {
+      console.warn("rate limiter RPC failed (fail-open):", error.message);
+      return { ok: true };
+    }
+    if (data === true) return { ok: true };
+    const nowSecs = Math.floor(Date.now() / 1e3);
+    const windowStartSecs = currentWindowStartSecs(ctx.windowSecs);
+    const elapsed = Math.max(0, nowSecs - windowStartSecs);
+    const retryAfterSec = Math.max(1, ctx.windowSecs - elapsed);
+    return { ok: false, retryAfterSec };
+  } catch (error) {
+    console.warn("rate limiter threw (fail-open):", error);
+    return { ok: true };
+  }
+}
+
+// src/audit.ts
+var AuditBatch = class {
+  constructor(supabase) {
+    this.supabase = supabase;
+  }
+  supabase;
+  queue = [];
+  push(evt) {
+    this.queue.push(evt);
+  }
+  async flush() {
+    for (const evt of this.queue) {
+      try {
+        const { error } = await this.supabase.rpc("record_audit_event", {
+          p_tenant: evt.tenantId ?? null,
+          p_event: evt.event,
+          p_severity: evt.severity,
+          p_subject: evt.subject ?? null,
+          p_meta: evt.meta ?? {}
+        });
+        if (error) {
+          console.warn("audit flush RPC failed:", error.message);
+        }
+      } catch (error) {
+        console.warn("audit flush threw:", error);
+      }
+    }
+    this.queue = [];
+  }
+};
+
+// src/quota.ts
+async function loadQuotaState(supabase, tenantId) {
+  try {
+    const { data, error } = await supabase.rpc("check_quota", { p_tenant: tenantId });
+    if (error) {
+      console.warn("quota RPC failed (fail-open):", error.message);
+      return { paused: false, ok: true, limitedBy: null };
+    }
+    const row = data ?? {};
+    return {
+      paused: row.paused === true,
+      ok: row.ok !== false,
+      limitedBy: row.limited_by === "paused" || row.limited_by === "runs" || row.limited_by === "tokens" || row.limited_by === "cost" ? row.limited_by : null,
+      runs_today: typeof row.runs_today === "number" ? row.runs_today : 0,
+      max_runs_per_day: typeof row.max_runs_per_day === "number" ? row.max_runs_per_day : null,
+      tokens_today: typeof row.tokens_today === "number" ? row.tokens_today : 0,
+      max_tokens_per_day: typeof row.max_tokens_per_day === "number" ? row.max_tokens_per_day : null,
+      cost_today_usd: typeof row.cost_today_usd === "number" ? row.cost_today_usd : 0,
+      max_cost_per_day_usd: typeof row.max_cost_per_day_usd === "number" ? row.max_cost_per_day_usd : null
+    };
+  } catch (error) {
+    console.warn("quota check threw (fail-open):", error);
+    return { paused: false, ok: true, limitedBy: null };
+  }
+}
+
 // src/handler.ts
 var CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "authorization, content-type, x-agent-core-impersonate-tenant",
+  "access-control-allow-headers": "authorization, content-type, x-agent-core-impersonate-tenant, x-forwarded-for",
   "access-control-allow-methods": "POST, OPTIONS"
 };
 var RUN_BUDGET = {
@@ -21931,13 +22017,28 @@ var SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
   "cache-control": "no-cache, no-transform",
   connection: "keep-alive",
-  // Disable nginx-style proxy buffering so frames flush as they're enqueued.
   "x-accel-buffering": "no"
 };
 function defaultRegistry() {
   const r = new ToolRegistry();
   for (const t of builtins) r.register(t);
   return r;
+}
+function readEnv6(name) {
+  const g = globalThis;
+  return g.Deno?.env.get(name) ?? g.process?.env?.[name];
+}
+var cachedSupabase = null;
+function getServiceSupabase() {
+  if (cachedSupabase) return cachedSupabase;
+  const url = readEnv6("SUPABASE_URL");
+  const key = readEnv6("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return null;
+  cachedSupabase = createClient(url, key, {
+    auth: { persistSession: false },
+    db: { schema: AGENT_CORE_SCHEMA2 }
+  });
+  return cachedSupabase;
 }
 async function devEnvLoadContext(tenantId, model) {
   const provider = Deno.env.get("AGENT_MODEL_PROVIDER") ?? "anthropic";
@@ -21958,6 +22059,11 @@ function randomRunId() {
   bytes[8] = bytes[8] & 63 | 128;
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function firstForwardedIp(req) {
+  const raw = req.headers.get("x-forwarded-for");
+  if (!raw) return "unknown";
+  return raw.split(",")[0]?.trim() || "unknown";
 }
 function createAgentHandler(opts = {}) {
   const customLoad = opts.loadTenantContext;
@@ -21983,30 +22089,72 @@ function createAgentHandler(opts = {}) {
       }
       const parsed = JSON.parse(new TextDecoder().decode(rawBody));
       const bodyTenantId = typeof parsed.tenantId === "string" ? parsed.tenantId : "";
-      if (!bodyTenantId) {
-        return jsonResponse({ error: "tenantId and message are required" }, 400);
-      }
-      if (typeof parsed.message !== "string") {
-        return jsonResponse({ error: "message must be a string" }, 400);
-      }
+      if (!bodyTenantId) return jsonResponse({ error: "tenantId and message are required" }, 400);
+      if (typeof parsed.message !== "string") return jsonResponse({ error: "message must be a string" }, 400);
       message = parsed.message;
-      if (parsed.model !== void 0 && typeof parsed.model !== "string") {
-        return jsonResponse({ error: "model must be a string" }, 400);
-      }
+      if (parsed.model !== void 0 && typeof parsed.model !== "string") return jsonResponse({ error: "model must be a string" }, 400);
       model = typeof parsed.model === "string" ? parsed.model : "";
       const tenantAuth = authorizeRuntimeTenant(bodyTenantId, req.headers);
-      if (!tenantAuth.ok) {
-        return jsonResponse({ error: tenantAuth.error }, tenantAuth.status);
-      }
+      if (!tenantAuth.ok) return jsonResponse({ error: tenantAuth.error }, tenantAuth.status);
       tenantId = tenantAuth.tenantId;
-      if (message.length > 1e5) {
-        return jsonResponse({ error: "message too long" }, 400);
-      }
-      if (model.length > 64) {
-        return jsonResponse({ error: "model too long" }, 400);
-      }
+      if (message.length > 1e5) return jsonResponse({ error: "message too long" }, 400);
+      if (model.length > 64) return jsonResponse({ error: "model too long" }, 400);
     } catch {
       return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    const supabase = getServiceSupabase();
+    const claims = decodeJwtClaimsFromAuthHeader(req.headers.get("authorization"));
+    const subjectTenant = `tenant:${tenantId}`;
+    const subjectUser = `user:${claims?.sub ?? "unknown"}`;
+    const subjectIp = `ip:${firstForwardedIp(req)}`;
+    if (supabase) {
+      const rateChecks = await Promise.allSettled([
+        checkRateLimit({ supabase, tenantId, subject: subjectTenant, windowSecs: 60, limit: 60 }),
+        checkRateLimit({ supabase, tenantId, subject: subjectUser, windowSecs: 60, limit: 30 }),
+        checkRateLimit({ supabase, tenantId, subject: subjectIp, windowSecs: 60, limit: 100 })
+      ]);
+      const denied = rateChecks.map((r, idx) => ({ r, subject: [subjectTenant, subjectUser, subjectIp][idx] })).find((entry) => entry.r.status === "fulfilled" && entry.r.value.ok === false);
+      if (denied && denied.r.status === "fulfilled") {
+        await supabase.rpc("record_audit_event", {
+          p_tenant: tenantId,
+          p_event: "rate_limit_triggered",
+          p_severity: "warn",
+          p_subject: denied.subject,
+          p_meta: { retry_after_sec: denied.r.value.retryAfterSec ?? 1 }
+        });
+        return new Response(JSON.stringify({ error: "rate_limited" }), {
+          status: 429,
+          headers: {
+            ...CORS,
+            "content-type": "application/json",
+            "Retry-After": String(denied.r.value.retryAfterSec ?? 1)
+          }
+        });
+      }
+    }
+    const ctxBasePre = await (customLoad ? customLoad(tenantId, model) : Deno.env.get("AGENT_ENV") === "dev" ? devEnvLoadContext(tenantId, model) : loadTenantContext(tenantId, model));
+    if (supabase) {
+      const quotaStatePre = await loadQuotaState(supabase, tenantId);
+      if (quotaStatePre.paused) {
+        await supabase.rpc("record_audit_event", {
+          p_tenant: tenantId,
+          p_event: "tenant_paused_request_denied",
+          p_severity: "warn",
+          p_subject: subjectTenant,
+          p_meta: {}
+        });
+        return jsonResponse({ error: "tenant paused" }, 503);
+      }
+      if (!quotaStatePre.ok) {
+        await supabase.rpc("record_audit_event", {
+          p_tenant: tenantId,
+          p_event: "quota_exceeded",
+          p_severity: "warn",
+          p_subject: subjectTenant,
+          p_meta: { limited_by: quotaStatePre.limitedBy }
+        });
+        return jsonResponse({ error: `quota: ${quotaStatePre.limitedBy ?? "unknown"}` }, 429);
+      }
     }
     const runId = randomRunId();
     const encoder = new TextEncoder();
@@ -22025,18 +22173,10 @@ function createAgentHandler(opts = {}) {
         let finalGraph;
         let runStatus = "failed";
         let runError;
+        const auditBatch = supabase ? new AuditBatch(supabase) : null;
         try {
           emit({ type: "start", runId, tenantId });
-          let ctx;
-          if (customLoad) {
-            const base = await customLoad(tenantId, model);
-            ctx = { ...base, registry };
-          } else if (Deno.env.get("AGENT_ENV") === "dev") {
-            const base = await devEnvLoadContext(tenantId, model);
-            ctx = { ...base, registry };
-          } else {
-            ctx = await loadTenantContext(tenantId, model);
-          }
+          const ctx = { ...ctxBasePre, registry };
           await persistRunStart({
             runId,
             tenantId,
@@ -22044,48 +22184,32 @@ function createAgentHandler(opts = {}) {
             modelProvider: ctx.modelProvider,
             userMessage: message
           });
-          const failBudget = (message2) => {
+          const failBudget = (reason) => {
             runStatus = "failed";
-            runError = message2;
-            emit({ type: "error", message: message2 });
+            runError = reason;
+            emit({ type: "error", message: reason });
             return false;
           };
-          const checkBudget = (_reason) => {
-            if (Date.now() - runStartedAt > RUN_BUDGET.MAX_RUN_WALL_TIME_MS) {
-              return failBudget("run budget: wall time exceeded");
-            }
-            if (toolCallCount > RUN_BUDGET.MAX_TOOL_CALLS_PER_RUN) {
-              return failBudget("run budget: too many tool calls");
-            }
-            if (tokensIn + tokensOut > RUN_BUDGET.MAX_TOKENS_PER_RUN) {
-              return failBudget("run budget: token cap exceeded");
-            }
-            if (cost > RUN_BUDGET.MAX_COST_PER_RUN_USD) {
-              return failBudget("run budget: cost cap exceeded");
-            }
+          const checkBudget = () => {
+            if (Date.now() - runStartedAt > RUN_BUDGET.MAX_RUN_WALL_TIME_MS) return failBudget("run budget: wall time exceeded");
+            if (toolCallCount > RUN_BUDGET.MAX_TOOL_CALLS_PER_RUN) return failBudget("run budget: too many tool calls");
+            if (tokensIn + tokensOut > RUN_BUDGET.MAX_TOKENS_PER_RUN) return failBudget("run budget: token cap exceeded");
+            if (cost > RUN_BUDGET.MAX_COST_PER_RUN_USD) return failBudget("run budget: cost cap exceeded");
             return true;
           };
           const addUsage = (u) => {
             tokensIn += u.tokensIn;
             tokensOut += u.tokensOut;
             cost += u.cost;
-            return checkBudget("add_usage");
+            return checkBudget();
           };
-          if (!checkBudget("before_planner")) return;
+          if (!checkBudget()) return;
           const planned = await planner(ctx, message);
           if (!addUsage(planned.usage)) return;
           let graph = planned.graph;
-          const plannedTaskCount = planned.graph.tasks.length;
-          if (plannedTaskCount > RUN_BUDGET.MAX_TASKS_PER_GRAPH) {
-            graph = {
-              ...planned.graph,
-              tasks: planned.graph.tasks.slice(0, RUN_BUDGET.MAX_TASKS_PER_GRAPH)
-            };
-            emit({
-              type: "plan_truncated",
-              original: plannedTaskCount,
-              kept: RUN_BUDGET.MAX_TASKS_PER_GRAPH
-            });
+          if (graph.tasks.length > RUN_BUDGET.MAX_TASKS_PER_GRAPH) {
+            graph = { ...graph, tasks: graph.tasks.slice(0, RUN_BUDGET.MAX_TASKS_PER_GRAPH) };
+            emit({ type: "plan_truncated", original: planned.graph.tasks.length, kept: RUN_BUDGET.MAX_TASKS_PER_GRAPH });
           }
           finalGraph = graph;
           emit({ type: "plan", graph });
@@ -22095,69 +22219,29 @@ function createAgentHandler(opts = {}) {
             role: "assistant",
             content: { kind: "plan", graph, usage: planned.usage }
           });
-          if (!checkBudget("before_execute")) return;
           const results = await executor(ctx, graph, {
             onEvent: emit,
             onWaveComplete: (completedCount) => {
               toolCallCount = completedCount;
-              return checkBudget("tool_wave");
+              return checkBudget();
             }
           });
           if (runStatus === "failed") return;
-          if (!checkBudget("after_execute")) return;
           await persistToolResults(runId, tenantId, results);
-          if (!checkBudget("before_synthesize")) return;
           const drafted = await synthesizer(ctx, message, results);
           if (!addUsage(drafted.usage)) return;
           let answer = drafted.text;
           emit({ type: "answer", text: answer });
-          await persistMessage({
-            runId,
-            tenantId,
-            role: "assistant",
-            content: { kind: "draft_answer", text: answer, usage: drafted.usage }
-          });
-          if (!checkBudget("before_critic")) return;
           const verdict = await critic(ctx, message, answer, results);
           if (!addUsage(verdict.usage)) return;
-          emit({
-            type: "critic",
-            ok: verdict.ok,
-            notes: verdict.notes
-          });
-          await persistMessage({
-            runId,
-            tenantId,
-            role: "assistant",
-            content: {
-              kind: "critic",
-              ok: verdict.ok,
-              notes: verdict.notes,
-              usage: verdict.usage
-            }
-          });
+          emit({ type: "critic", ok: verdict.ok, notes: verdict.notes });
           if (!verdict.ok) {
-            if (!checkBudget("before_corrective_synthesize")) return;
-            const corrected = await synthesizer(
-              ctx,
-              `${message}
+            const corrected = await synthesizer(ctx, `${message}
 
-Verifier feedback to address: ${verdict.notes}`,
-              results
-            );
+Verifier feedback to address: ${verdict.notes}`, results);
             if (!addUsage(corrected.usage)) return;
             answer = corrected.text;
             emit({ type: "answer", text: answer });
-            await persistMessage({
-              runId,
-              tenantId,
-              role: "assistant",
-              content: {
-                kind: "final_answer",
-                text: answer,
-                usage: corrected.usage
-              }
-            });
           }
           const result = {
             answer,
@@ -22192,6 +22276,7 @@ Verifier feedback to address: ${verdict.notes}`,
             taskGraph: finalGraph,
             error: runError
           });
+          await auditBatch?.flush();
           closed = true;
           controller.close();
         }
@@ -22340,11 +22425,13 @@ function base64urlEncode(bytes) {
 }
 export {
   AGENT_CORE_SCHEMA2 as AGENT_CORE_SCHEMA,
+  AuditBatch,
   OAUTH_PROVIDERS,
   RUN_BUDGET,
   authorizeRuntimeTenant,
   buildAuthorizeUrl,
   callModel,
+  checkRateLimit,
   createAgentHandler,
   critique,
   decodeJwtClaimsFromAuthHeader,
@@ -22355,6 +22442,7 @@ export {
   generatePkcePair,
   generateState,
   getProviderConfig,
+  loadQuotaState,
   loadTenantContext,
   parseSseChunk,
   parseSseFrame,
