@@ -1,9 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from 'react';
 import {
-  ago, colorFor, loadAuditPage, loadSettings,
-  type ActivityEvent, type AggregatorSchedule, type AuditPage, type IntegrationsAppBreakdown,
+  ago, colorFor, loadAllDecisions, loadAuditPage, loadSettings,
+  type ActivityEvent, type AggregatorSchedule, type AllDecisionsPayload, type AuditPage, type DecisionAdminRow, type IntegrationsAppBreakdown,
   type IntegrationStatus, type SecretInventory, type SettingsPayload,
 } from './lib';
+import { SlideOver } from './SlideOver';
 
 export type SettingsViewHandle = {
   refresh: () => Promise<void>;
@@ -25,11 +26,14 @@ const emptySettings: SettingsPayload = {
 };
 
 const emptyAudit: AuditPage = { events: [], cursor: { next: null, has_more: false } };
+const emptyAllDecisions: AllDecisionsPayload = { decisions: [] };
+type DecisionAdminFilter = 'all' | 'open' | 'routed' | 'awaiting_reply' | 'late_replies' | 'answered' | 'done';
 
 export const SettingsView = forwardRef<SettingsViewHandle, { demo: boolean }>(function SettingsView({ demo }, ref) {
   const [state, setState] = useState<LoadState>('loading');
   const [payload, setPayload] = useState<SettingsPayload>(emptySettings);
   const [audit, setAudit] = useState<AuditPage>(emptyAudit);
+  const [allDecisions, setAllDecisions] = useState<AllDecisionsPayload>(emptyAllDecisions);
   const [error, setError] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -37,17 +41,20 @@ export const SettingsView = forwardRef<SettingsViewHandle, { demo: boolean }>(fu
     setState('loading');
     setError('');
     try {
-      const [settings, auditPage] = await Promise.all([
+      const [settings, auditPage, decisionsPayload] = await Promise.all([
         loadSettings(demo),
         loadAuditPage(demo),
+        loadAllDecisions(demo),
       ]);
       setPayload(settings);
       setAudit(filterAuditPage(auditPage));
+      setAllDecisions(decisionsPayload);
       setState('ready');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPayload(emptySettings);
       setAudit(emptyAudit);
+      setAllDecisions(emptyAllDecisions);
       setState('error');
     }
   }
@@ -86,6 +93,7 @@ export const SettingsView = forwardRef<SettingsViewHandle, { demo: boolean }>(fu
       <IntegrationsBand apps={payload.integrations.by_app} totals={payload.integrations.totals} loading={state === 'loading'} />
       <SecretsBand secrets={payload.secrets} loading={state === 'loading'} />
       <AuditBand audit={audit} loading={state === 'loading'} loadingMore={loadingMore} onLoadMore={loadMore} />
+      <DecisionsAdminBand payload={allDecisions} loading={state === 'loading'} />
     </div>
   );
 });
@@ -253,6 +261,98 @@ function AuditBand({ audit, loading, loadingMore, onLoadMore }: { audit: AuditPa
   );
 }
 
+function DecisionsAdminBand({ payload, loading }: { payload: AllDecisionsPayload; loading: boolean }) {
+  const [filter, setFilter] = useState<DecisionAdminFilter>('all');
+  const [selected, setSelected] = useState<DecisionAdminRow | null>(null);
+  const rows = useMemo(() => payload.decisions.filter((row) => decisionAdminMatches(row, filter)), [payload.decisions, filter]);
+  const filters: Array<{ id: DecisionAdminFilter; label: string }> = [
+    { id: 'all', label: 'All' },
+    { id: 'open', label: 'Open' },
+    { id: 'routed', label: 'Routed' },
+    { id: 'awaiting_reply', label: 'Awaiting reply' },
+    { id: 'late_replies', label: 'Late replies' },
+    { id: 'answered', label: 'Answered' },
+    { id: 'done', label: 'Done' },
+  ];
+  return (
+    <SettingsSection num="6" title="Decisions admin" subtitle="All decisions, across all states, regardless of the lookback window." count={rows.length}>
+      {loading ? <SkeletonRows /> : payload.decisions.length === 0 ? <Empty title="No decisions" copy="No control-plane decision rows were returned." /> : (
+        <>
+          <div className="settings-decision-filters">
+            {filters.map((item) => (
+              <button key={item.id} className={'decision-chip' + (filter === item.id ? ' active' : '')} onClick={() => setFilter(item.id)}>{item.label}</button>
+            ))}
+          </div>
+          {rows.length === 0 ? <Empty title="No matching decisions" copy="Try a different filter." /> : (
+            <div className="settings-decisions-table-wrap">
+              <table className="agents-table settings-decisions-table">
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>App</th>
+                    <th>Last action</th>
+                    <th>Send count</th>
+                    <th>Answer count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.id} className="settings-decision-row" onClick={() => setSelected(row)} tabIndex={0} onKeyDown={(ev) => { if (ev.key === 'Enter') setSelected(row); }}>
+                      <td><div className="agents-primary">{row.title}</div><div className="agents-muted">{row.source_ref || row.id}</div></td>
+                      <td><span className={'status-chip ' + row.status}>{label(row.status)}</span>{row.late_reply_count > 0 && <span className="settings-late-pill">Late reply</span>}</td>
+                      <td>{row.app_short_code ?? row.app_display_name ?? '—'}</td>
+                      <td><div className="agents-primary">{row.last_action ?? '—'}</div><div className="agents-muted">{ago(row.last_action_at ?? row.updated_at ?? undefined) ?? '—'} ago</div></td>
+                      <td>{row.send_count}</td>
+                      <td>{row.answer_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <DecisionHistoryPanel row={selected} onClose={() => setSelected(null)} />
+        </>
+      )}
+    </SettingsSection>
+  );
+}
+
+function DecisionHistoryPanel({ row, onClose }: { row: DecisionAdminRow | null; onClose: () => void }) {
+  const events = useMemo(() => row ? buildDecisionTimeline(row) : [], [row]);
+  return (
+    <SlideOver open={!!row} title={row?.title ?? 'Decision'} subtitle={row ? `${row.app_short_code ?? row.app_display_name ?? 'App'} · ${label(row.status)} · ${row.source_ref || row.id}` : undefined} onClose={onClose}>
+      {row && (
+        <>
+          <div className="settings-decision-summary">
+            <InfoCard label="Status" value={label(row.status)} />
+            <InfoCard label="Sends" value={String(row.send_count)} />
+            <InfoCard label="Answers" value={String(row.answer_count)} />
+            <InfoCard label="Late replies" value={String(row.late_reply_count)} />
+          </div>
+          {row.summary && <div className="panel-note">{row.summary}</div>}
+          <div className="panel-section">
+            <div className="panel-label">Full history</div>
+            <div className="panel-stack">
+              {events.length === 0 ? <Empty title="No history" copy="No sends, answers, or audit events were returned." /> : events.map((event, index) => (
+                <div className="panel-card" key={`${event.at}-${event.kind}-${index}`}>
+                  <b>{event.label}</b>
+                  <span>{event.at ? `${ago(event.at) ?? '—'} ago` : 'time unknown'} · {event.actor ?? event.kind}</span>
+                  {event.detail && <em>{event.detail}</em>}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="panel-section">
+            <div className="panel-label">Debug detail</div>
+            <pre className="settings-debug-json">{JSON.stringify({ detail: row.detail, context: row.context }, null, 2)}</pre>
+          </div>
+        </>
+      )}
+    </SlideOver>
+  );
+}
+
 function SettingsSection({ num, title, subtitle, count, children }: { num: string; title: string; subtitle: string; count: number; children: ReactNode }) {
   return (
     <section className="band agents-section settings-section">
@@ -341,6 +441,77 @@ function SkeletonRows() {
 
 function filterAuditPage(page: AuditPage): AuditPage {
   return { ...page, events: page.events.filter((event) => !HIDDEN_AUDIT_EVENTS.has(event.event_type)) };
+}
+
+function decisionAdminMatches(row: DecisionAdminRow, filter: DecisionAdminFilter): boolean {
+  const status = String(row.status);
+  if (filter === 'all') return true;
+  if (filter === 'open') return ['surfaced', 'triaging', 'gated'].includes(status);
+  if (filter === 'routed') return status === 'routed_to_client';
+  if (filter === 'awaiting_reply') return status === 'routed_to_client' && row.answer_count === 0;
+  if (filter === 'late_replies') return row.late_reply_count > 0;
+  if (filter === 'answered') return status === 'answered' || row.answer_count > 0;
+  if (filter === 'done') return status === 'done';
+  return true;
+}
+
+function buildDecisionTimeline(row: DecisionAdminRow): Array<{ at: string | null; kind: string; label: string; actor?: string | null; detail?: string | null }> {
+  const events: Array<{ at: string | null; kind: string; label: string; actor?: string | null; detail?: string | null }> = [];
+  for (const send of row.sends) {
+    events.push({
+      at: textField(send, 'sent_at') ?? textField(send, 'created_at'),
+      kind: 'send',
+      label: `Email ${textField(send, 'state') ?? 'send'}`,
+      actor: textField(send, 'recipient_email'),
+      detail: textField(send, 'raw_decision_title') ?? textField(send, 'last_error'),
+    });
+    const replyAt = textField(send, 'inbound_received_at') ?? textField(send, 'replied_at');
+    if (replyAt) events.push({ at: replyAt, kind: 'reply', label: 'Reply received', actor: textField(send, 'recipient_email'), detail: textField(send, 'raw_reply_text') });
+  }
+  for (const answer of row.answers) {
+    events.push({
+      at: textField(answer, 'answered_at') ?? textField(answer, 'created_at'),
+      kind: 'answer',
+      label: `Answered: ${textField(answer, 'answer_value') ?? 'choice'}`,
+      actor: textField(answer, 'answered_by'),
+      detail: textField(answer, 'rationale'),
+    });
+  }
+  for (const late of row.late_replies) {
+    events.push({
+      at: textField(late, 'created_at') ?? textField(late, 'surfaced_at'),
+      kind: 'late_reply',
+      label: textField(late, 'title') ?? 'Late reply arrived',
+      actor: textField(recordField(late, 'detail'), 'recipient_email'),
+      detail: textField(late, 'summary'),
+    });
+  }
+  for (const auditEvent of row.audit_events) {
+    events.push({
+      at: auditEvent.occurred_at ?? null,
+      kind: 'audit',
+      label: label(auditEvent.event_type ?? 'audit event'),
+      actor: auditEvent.actor ?? null,
+      detail: detailPreview(auditEvent.detail ?? null),
+    });
+  }
+  return events.sort((a, b) => timeMs(b.at) - timeMs(a.at));
+}
+
+function recordField(row: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = row[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function textField(row: Record<string, unknown> | null, key: string): string | null {
+  const value = row?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function timeMs(value: string | null | undefined): number {
+  if (!value) return 0;
+  const n = Date.parse(value);
+  return Number.isNaN(n) ? 0 : n;
 }
 
 function freshnessOk(value: string | null): boolean {

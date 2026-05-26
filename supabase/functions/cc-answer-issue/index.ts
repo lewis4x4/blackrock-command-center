@@ -60,6 +60,8 @@ type AnswerRequest = {
   risk_class?: unknown;
   linked_decision_ref?: unknown;
   decision_external_ref?: unknown;
+  source?: unknown;
+  answer_source?: unknown;
 };
 type ResolveIssueParams = {
   issue_id: string;
@@ -71,6 +73,7 @@ type ResolveIssueParams = {
   linked_decision_ref: string | null;
   actor: string;
   decision_external_ref: string | null;
+  answer_source: "operator" | "client_reply" | "auto_extraction" | "smoke_test" | "system" | "manual_remediation" | null;
 };
 type RpcErrorPayload = {
   code?: string;
@@ -276,6 +279,45 @@ async function resolveIssueViaRpc(params: ResolveIssueParams): Promise<unknown> 
   return await r.json();
 }
 
+async function loadIssueForAlert(issueId: string): Promise<Record<string, unknown> | null> {
+  const r = await fetch(`${CP_URL}/rest/v1/cc_issues?id=eq.${issueId}&select=id,app_id,title,status,source_ref&limit=1`, { headers: cpHeaders });
+  if (!r.ok) return null;
+  const rows = await r.json().catch(() => []) as unknown;
+  return Array.isArray(rows) && isRecord(rows[0]) ? rows[0] : null;
+}
+
+function requestAnswerSource(body: AnswerRequest): string | null {
+  return cleanString(body.source, 80) ?? cleanString(body.answer_source, 80);
+}
+
+function isSmokeTestBlocked(body: AnswerRequest, error: RpcError): boolean {
+  const source = requestAnswerSource(body)?.toLowerCase();
+  const haystack = `${error.message} ${error.details ?? ""} ${error.hint ?? ""}`.toLowerCase();
+  return source === "smoke_test" || (haystack.includes("smoke") && haystack.includes("routed"));
+}
+
+async function notifySmokeTestBlocked(issueId: string, body: AnswerRequest, actor: string, error: RpcError): Promise<void> {
+  const writeToken = Deno.env.get("CC_WRITE_TOKEN") ?? "";
+  if (!writeToken) return;
+  const issue = await loadIssueForAlert(issueId);
+  const appId = isRecord(issue) ? asString(issue.app_id) : null;
+  const decisionRef = cleanString(body.decision_external_ref, 200) ?? (isRecord(issue) ? asString(issue.source_ref) : null);
+  const title = isRecord(issue) ? asString(issue.title) : null;
+  const detail = error.details ? ` (${error.details})` : "";
+  await fetch(`${CP_URL}/functions/v1/cc-telegram-notify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-cc-write-token": writeToken },
+    body: JSON.stringify({
+      event_type: "smoke_test_blocked",
+      severity: "critical",
+      app_id: appId,
+      title: "🚨 Smoke-test answer blocked",
+      body: `Rejected a smoke-test answer attempt${decisionRef ? ` for decision ${decisionRef}` : ""}${title ? ` (${title})` : ""}. Actor: ${actor}.${detail}`,
+      deep_link: "/settings",
+    }),
+  }).catch(() => undefined);
+}
+
 function rpcErrorResponse(e: RpcError, accessCheck: "noop" | "pass"): Response {
   const message = e.message || "issue update failed";
 
@@ -339,11 +381,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       linked_decision_ref: payload.linkedDecisionRef ?? null,
       actor: access.actor,
       decision_external_ref: cleanString(parsed.body.decision_external_ref, 200),
+      answer_source: parsed.action === "answer_decision" ? "operator" : null,
     });
 
     return buildJsonResponse({ issue: updatedIssue, action: parsed.action }, 200, access.headerValue);
   } catch (e) {
-    if (e instanceof RpcError) return rpcErrorResponse(e, access.headerValue);
+    if (e instanceof RpcError) {
+      if (isSmokeTestBlocked(parsed.body, e)) {
+        await notifySmokeTestBlocked(parsed.issueId, parsed.body, access.actor, e);
+      }
+      return rpcErrorResponse(e, access.headerValue);
+    }
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "issue update failed", detail: msg }, 500, access.headerValue);
   }

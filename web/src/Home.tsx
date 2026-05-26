@@ -197,6 +197,7 @@ function issueAction(issueType: IssueRow['issue_type']): string {
     case 'build_health': return 'View build';
     case 'blocked_item': return 'Review blockers';
     case 'sync_error': return 'Check sync';
+    default: return 'Review';
   }
 }
 

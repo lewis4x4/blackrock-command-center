@@ -65,7 +65,7 @@ export interface ActivityEvent {
   short_code?: string;
 }
 
-export type IssueType = 'open_decision' | 'build_health' | 'blocked_item' | 'sync_error';
+export type IssueType = 'open_decision' | 'build_health' | 'blocked_item' | 'sync_error' | 'governance_alert' | 'late_reply';
 export type IssueStatus =
   | 'surfaced' | 'triaging' | 'answered' | 'work_order_created'
   | 'dispatched' | 'building' | 'pr_open' | 'done'
@@ -763,7 +763,7 @@ function parseMomentum(value: unknown): Momentum {
   return { shipped_delta: asNumber(rec.shipped_delta) ?? undefined };
 }
 
-const ISSUE_TYPES = new Set<IssueType>(['open_decision', 'build_health', 'blocked_item', 'sync_error']);
+const ISSUE_TYPES = new Set<IssueType>(['open_decision', 'build_health', 'blocked_item', 'sync_error', 'governance_alert', 'late_reply']);
 const ISSUE_STATUSES = new Set<IssueStatus>([
   'surfaced', 'triaging', 'answered', 'work_order_created', 'dispatched', 'building', 'pr_open', 'done',
   'routed_to_client', 'gated', 'dismissed',
@@ -1830,6 +1830,46 @@ export interface DecisionsPayload {
   generated_at?: string;
 }
 
+export interface DecisionAdminHistoryEvent extends Record<string, unknown> {
+  occurred_at?: string | null;
+  actor?: string | null;
+  event_type?: string | null;
+  detail?: Record<string, unknown> | null;
+}
+
+export interface DecisionAdminRow extends Record<string, unknown> {
+  id: string;
+  app_id: string;
+  app_short_code: string | null;
+  app_display_name: string | null;
+  source_ref: string;
+  status: IssueStatus | string;
+  severity: IssueSeverity | string;
+  title: string;
+  summary: string | null;
+  detail: Record<string, unknown> | null;
+  context: Record<string, unknown> | null;
+  surfaced_at: string | null;
+  last_seen_at: string | null;
+  resolved_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  send_count: number;
+  answer_count: number;
+  late_reply_count: number;
+  last_action_at: string | null;
+  last_action: string | null;
+  sends: Record<string, unknown>[];
+  answers: Record<string, unknown>[];
+  audit_events: DecisionAdminHistoryEvent[];
+  late_replies: Record<string, unknown>[];
+}
+
+export interface AllDecisionsPayload {
+  decisions: DecisionAdminRow[];
+  generated_at?: string;
+}
+
 export type DecisionOwnerFilter = 'all' | 'operator' | 'client' | 'unknown';
 export type DecisionAgeFilter = 'all' | '0-2' | '3-7' | '8+';
 export type DecisionSort = 'oldest' | 'newest';
@@ -1880,6 +1920,97 @@ const DEMO_PENDING_REVIEWS: PendingReviewSend[] = [
     llm_extraction: { matched_option_id: null, confidence: 0.42, rationale: 'ambiguous and asks counter-question', requires_human: true, suggested_clarification: 'Should we ship plain language or keep OEM terms?' },
     clarification_attempt_count: 1,
     state: 'awaiting_operator_review',
+  },
+];
+
+const DEMO_ALL_DECISIONS: DecisionAdminRow[] = [
+  {
+    id: 'demo-qep-decision-admin-open',
+    app_id: 'qep',
+    app_short_code: 'QEP',
+    app_display_name: 'QEP OS',
+    source_ref: 'Q10',
+    status: 'surfaced',
+    severity: 'high',
+    title: 'Rebate stacking rules',
+    summary: 'Client needs to choose whether rebates can stack or whether the biggest rebate wins.',
+    detail: { risk_class: 'authorize', options: [{ id: 'stack', label: 'Allow stacking' }, { id: 'pick_one', label: 'Customer picks one' }] },
+    context: {},
+    surfaced_at: isoAgo(180),
+    last_seen_at: isoAgo(20),
+    resolved_at: null,
+    created_at: isoAgo(180),
+    updated_at: isoAgo(20),
+    send_count: 1,
+    answer_count: 0,
+    late_reply_count: 0,
+    last_action_at: isoAgo(20),
+    last_action: 'email sent',
+    sends: [{ id: 'demo-send-q10', state: 'sent', recipient_email: 'rylee@qep.com', sent_at: isoAgo(20), raw_decision_title: 'Rebate stacking rules' }],
+    answers: [],
+    audit_events: [{ occurred_at: isoAgo(20), actor: 'operator', event_type: 'decision_routed', detail: { issue_id: 'demo-qep-decision-admin-open', decision_external_ref: 'Q10' } }],
+    late_replies: [],
+  },
+  {
+    id: 'demo-qep-decision-admin-late',
+    app_id: 'qep',
+    app_short_code: 'QEP',
+    app_display_name: 'QEP OS',
+    source_ref: 'Q11',
+    status: 'done',
+    severity: 'normal',
+    title: 'Portal fallback copy',
+    summary: 'Already answered, but a later client reply arrived after closure.',
+    detail: { risk_class: 'auto' },
+    context: {},
+    surfaced_at: isoAgo(320),
+    last_seen_at: isoAgo(12),
+    resolved_at: isoAgo(80),
+    created_at: isoAgo(320),
+    updated_at: isoAgo(12),
+    send_count: 2,
+    answer_count: 1,
+    late_reply_count: 1,
+    last_action_at: isoAgo(12),
+    last_action: 'late reply',
+    sends: [
+      { id: 'demo-send-q11-a', state: 'answered', recipient_email: 'ryan@qep.com', sent_at: isoAgo(260), answered_at: isoAgo(80), raw_decision_title: 'Portal fallback copy' },
+      { id: 'demo-send-q11-b', state: 'sent', recipient_email: 'rylee@qep.com', sent_at: isoAgo(250), raw_decision_title: 'Portal fallback copy' },
+    ],
+    answers: [{ id: 'demo-answer-q11', answer_value: 'plain', answered_by: 'client-magic-link', answered_at: isoAgo(80), rationale: 'Client picked plain language.' }],
+    audit_events: [
+      { occurred_at: isoAgo(260), actor: 'operator', event_type: 'decision_routed', detail: { issue_id: 'demo-qep-decision-admin-late', decision_external_ref: 'Q11' } },
+      { occurred_at: isoAgo(80), actor: 'client-magic-link', event_type: 'decision_answered_by_recipient', detail: { issue_id: 'demo-qep-decision-admin-late', selected_option: 'plain' } },
+      { occurred_at: isoAgo(12), actor: 'cc-gmail-inbound', event_type: 'late_reply_arrived', detail: { decision_external_ref: 'Q11', recipient_email: 'rylee@qep.com' } },
+    ],
+    late_replies: [{ id: 'demo-late-q11', title: 'Late reply on Portal fallback copy', source_ref: 'Q11', created_at: isoAgo(12), detail: { recipient_email: 'rylee@qep.com' } }],
+  },
+  {
+    id: 'demo-scc-decision-admin-stuck',
+    app_id: 'scc',
+    app_short_code: 'SCC',
+    app_display_name: 'SCC',
+    source_ref: 'SCC-44',
+    status: 'routed_to_client',
+    severity: 'normal',
+    title: 'Confirm sync retry policy',
+    summary: 'Routed more than 14 days ago and still waiting on a client answer.',
+    detail: { risk_class: 'authorize' },
+    context: {},
+    surfaced_at: isoAgo(60 * 24 * 16),
+    last_seen_at: isoAgo(60 * 24 * 15),
+    resolved_at: null,
+    created_at: isoAgo(60 * 24 * 16),
+    updated_at: isoAgo(60 * 24 * 15),
+    send_count: 1,
+    answer_count: 0,
+    late_reply_count: 0,
+    last_action_at: isoAgo(60 * 24 * 15),
+    last_action: 'email sent',
+    sends: [{ id: 'demo-send-scc-44', state: 'sent', recipient_email: 'client@scc.example', sent_at: isoAgo(60 * 24 * 15), raw_decision_title: 'Confirm sync retry policy' }],
+    answers: [],
+    audit_events: [{ occurred_at: isoAgo(60 * 24 * 15), actor: 'operator', event_type: 'decision_routed', detail: { issue_id: 'demo-scc-decision-admin-stuck', decision_external_ref: 'SCC-44' } }],
+    late_replies: [],
   },
 ];
 
@@ -2039,6 +2170,63 @@ function parseDecisionsPayload(value: unknown): DecisionsPayload {
   };
 }
 
+function parseDecisionAdminHistoryEvent(value: unknown): DecisionAdminHistoryEvent {
+  const rec = asRecord(value);
+  return {
+    ...rec,
+    occurred_at: asString(rec.occurred_at),
+    actor: asString(rec.actor),
+    event_type: asString(rec.event_type),
+    detail: isRecord(rec.detail) ? rec.detail : null,
+  };
+}
+
+function parseDecisionAdminRow(value: unknown): DecisionAdminRow {
+  if (!isRecord(value)) throw new Error('cc-read-all-decisions payload contains an invalid decision row');
+  const id = asString(value.id);
+  const appId = asString(value.app_id);
+  const title = asString(value.title);
+  if (!id || !appId || !title) throw new Error('cc-read-all-decisions decision row is missing required fields');
+  return {
+    ...value,
+    id,
+    app_id: appId,
+    app_short_code: asString(value.app_short_code),
+    app_display_name: asString(value.app_display_name),
+    source_ref: asString(value.source_ref) ?? '',
+    status: asString(value.status) ?? 'surfaced',
+    severity: asString(value.severity) ?? 'normal',
+    title,
+    summary: asString(value.summary),
+    detail: isRecord(value.detail) ? value.detail : null,
+    context: isRecord(value.context) ? value.context : null,
+    surfaced_at: asString(value.surfaced_at),
+    last_seen_at: asString(value.last_seen_at),
+    resolved_at: asString(value.resolved_at),
+    created_at: asString(value.created_at),
+    updated_at: asString(value.updated_at),
+    send_count: asNumber(value.send_count) ?? 0,
+    answer_count: asNumber(value.answer_count) ?? 0,
+    late_reply_count: asNumber(value.late_reply_count) ?? 0,
+    last_action_at: asString(value.last_action_at),
+    last_action: asString(value.last_action),
+    sends: Array.isArray(value.sends) ? value.sends.filter(isRecord) : [],
+    answers: Array.isArray(value.answers) ? value.answers.filter(isRecord) : [],
+    audit_events: Array.isArray(value.audit_events) ? value.audit_events.map(parseDecisionAdminHistoryEvent) : [],
+    late_replies: Array.isArray(value.late_replies) ? value.late_replies.filter(isRecord) : [],
+  };
+}
+
+function parseAllDecisionsPayload(value: unknown): AllDecisionsPayload {
+  if (!isRecord(value) || !Array.isArray(value.decisions)) {
+    throw new Error('cc-read-all-decisions payload is invalid');
+  }
+  return {
+    decisions: value.decisions.map(parseDecisionAdminRow),
+    generated_at: asString(value.generated_at) ?? undefined,
+  };
+}
+
 function decisionOwnerKind(row: Record<string, unknown>): 'operator' | 'client' | 'unknown' {
   const values = ['owner_type', 'owner_kind', 'answer_owner', 'owned_by', 'decision_owner']
     .map((key) => asString(row[key])?.toLowerCase())
@@ -2140,6 +2328,11 @@ export async function loadDecisions(filters: DecisionsFilters, demo: boolean): P
   if (demo) return demoDecisionsPayload(filters);
   const payload = parseDecisionsPayload(await fetchJson('cc-read-decisions', buildDecisionParams(filters)));
   return { ...payload, decisions: sortDecisionRows(filterDecisionRows(payload.decisions, filters), filters.sort) };
+}
+
+export async function loadAllDecisions(demo: boolean): Promise<AllDecisionsPayload> {
+  if (demo) return { decisions: structuredClone(DEMO_ALL_DECISIONS), generated_at: new Date().toISOString() };
+  return parseAllDecisionsPayload(await fetchJson('cc-read-all-decisions'));
 }
 
 export async function loadPendingReviews(demo: boolean): Promise<PendingReviewSend[]> {

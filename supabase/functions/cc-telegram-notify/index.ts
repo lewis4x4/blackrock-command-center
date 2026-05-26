@@ -33,8 +33,14 @@ const FUNCTION_NAME = "cc-telegram-notify";
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-type Severity = "low" | "normal" | "high" | "critical";
-type NotifyEventType = "work_order_gated" | "handoff_created" | "work_order_pr_opened";
+type Severity = "low" | "normal" | "medium" | "high" | "critical";
+type NotifyEventType =
+  | "work_order_gated"
+  | "handoff_created"
+  | "work_order_pr_opened"
+  | "late_reply_arrived"
+  | "smoke_test_blocked"
+  | "answer_source_anomaly";
 
 type NotifyPayload = {
   event_type: NotifyEventType | string;
@@ -111,8 +117,18 @@ async function verifyCaller(req: Request): Promise<{ ok: true; status: 200; head
   const auth = req.headers.get("Authorization") ?? "";
   if (CP_KEY && auth === `Bearer ${CP_KEY}`) return { ok: true, status: 200, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
   const writeAuth = verifyWriteToken(req);
-  if (!writeAuth.ok) return { ok: false, status: writeAuth.status, error: writeAuth.error, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
-  return { ok: true, status: 200, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
+  if (writeAuth.ok) return { ok: true, status: 200, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
+
+  // pg_net calls originate inside Postgres and use Vault. This project has the
+  // server-only auto-route toggle token in Vault but not CC_WRITE_TOKEN, so keep
+  // the public read token blocked while allowing that operator-control secret.
+  const toggleToken = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
+  const presentedToggle = req.headers.get("x-cc-auto-route-toggle") ?? req.headers.get("x-cc-write-token") ?? "";
+  if (toggleToken && presentedToggle === toggleToken && toggleToken !== Deno.env.get("CC_READ_TOKEN")) {
+    return { ok: true, status: 200, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
+  }
+
+  return { ok: false, status: writeAuth.status, error: writeAuth.error, headerValue: ACCESS_REQUIRED ? "pass" : "noop" };
 }
 
 function parsePayload(value: unknown): { ok: true; payload: NotifyPayload } | { ok: false; error: string } {
@@ -135,7 +151,7 @@ function parsePayload(value: unknown): { ok: true; payload: NotifyPayload } | { 
 
 function normalizeSeverity(value: unknown): Severity | null {
   const raw = cleanString(value, 20)?.toLowerCase();
-  if (raw === "low" || raw === "normal" || raw === "high" || raw === "critical") return raw;
+  if (raw === "low" || raw === "normal" || raw === "medium" || raw === "high" || raw === "critical") return raw;
   return null;
 }
 
@@ -143,26 +159,53 @@ function shouldNotify(eventType: string, severity: Severity): { notify: true } |
   if (eventType === "work_order_pr_opened") return { notify: true };
   if (eventType === "work_order_gated") return severityRank(severity) >= severityRank("high") ? { notify: true } : { notify: false, reason: "severity_below_gate" };
   if (eventType === "handoff_created") return severity === "critical" ? { notify: true } : { notify: false, reason: "severity_below_gate" };
+  if (eventType === "late_reply_arrived") return severityRank(severity) >= severityRank("high") ? { notify: true } : { notify: false, reason: "severity_below_gate" };
+  if (eventType === "smoke_test_blocked") return severity === "critical" ? { notify: true } : { notify: false, reason: "severity_below_gate" };
+  if (eventType === "answer_source_anomaly") return severityRank(severity) >= severityRank("medium") ? { notify: true } : { notify: false, reason: "severity_below_gate" };
   return { notify: false, reason: "unsupported_event_type" };
 }
 
 function severityRank(severity: Severity): number {
-  if (severity === "critical") return 3;
-  if (severity === "high") return 2;
+  if (severity === "critical") return 4;
+  if (severity === "high") return 3;
+  if (severity === "medium") return 2;
   if (severity === "normal") return 1;
   return 0;
 }
 
 function renderTelegramMessage(payload: NotifyPayload): string {
+  const rendered = renderEventCopy(payload);
   const lines = [
-    `*${escapeMarkdownV2(payload.title)}*`,
+    `*${escapeMarkdownV2(rendered.title)}*`,
     "",
-    escapeMarkdownV2(payload.body),
+    escapeMarkdownV2(rendered.body),
   ];
   if (payload.deep_link) {
     lines.push("", escapeMarkdownV2(payload.deep_link));
   }
   return lines.join("\n");
+}
+
+function renderEventCopy(payload: NotifyPayload): { title: string; body: string } {
+  switch (payload.event_type) {
+    case "late_reply_arrived":
+      return {
+        title: payload.title || "🟡 Late client reply — decision was already closed",
+        body: payload.body || "A client replied after the decision was already closed. Open Settings → Decisions admin to inspect the decision history before any follow-up work moves.",
+      };
+    case "smoke_test_blocked":
+      return {
+        title: payload.title || "🚨 Smoke-test answer blocked",
+        body: payload.body || "A smoke-test answer tried to land on a routed production decision and was rejected by the guardrail.",
+      };
+    case "answer_source_anomaly":
+      return {
+        title: payload.title || "🟠 Decision answer anomaly digest",
+        body: payload.body || "The daily anomaly scan found unusual decision-answer patterns. Review the governance alert in Settings → Decisions admin.",
+      };
+    default:
+      return { title: payload.title, body: payload.body };
+  }
 }
 
 function escapeMarkdownV2(value: string): string {
@@ -213,5 +256,5 @@ async function auditFailure(payload: NotifyPayload, code: string, detail: Record
 }
 
 function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
