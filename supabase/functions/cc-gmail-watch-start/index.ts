@@ -54,15 +54,23 @@ Deno.serve(async (req) => {
       return json({ error: "Gmail users.watch returned no historyId", body }, 500, access.headerValue);
     }
 
-    // Seed / update cc_gmail_history_cursor so cc-gmail-inbound has a baseline.
-    // The singleton row (id=1) is seeded by migration 024 with history_id NULL.
-    await cpPatch(`cc_gmail_history_cursor?id=eq.1`, {
-      history_id: historyId,
-    });
+    // Seed cc_gmail_history_cursor only when it is empty. On renewals, keep the
+    // existing cursor so a manual or Pub/Sub inbound run can backfill messages
+    // that arrived while the watch was expired or the push path was broken.
+    const cursorRows = await cpGet("cc_gmail_history_cursor?id=eq.1&select=history_id");
+    const previousHistoryId = cursorRows.find(isRecord)?.history_id;
+    const cursorUpdated = !previousHistoryId;
+    if (cursorUpdated) {
+      await cpPatch(`cc_gmail_history_cursor?id=eq.1`, {
+        history_id: historyId,
+      });
+    }
 
     return json({
       ok: true,
       historyId,
+      previous_history_id: previousHistoryId ?? null,
+      cursor_updated: cursorUpdated,
       expiration_ms: expiration,
       expiration_iso: expiration ? new Date(Number(expiration)).toISOString() : null,
       expires_in_days: expiration ? Math.round((Number(expiration) - Date.now()) / 86_400_000) : null,

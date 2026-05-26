@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { CP_URL, asArray, asString, cleanString, cpAudit, cpGet, cpHeaders, cpPatch, gmailAccessToken, isRecord, json } from "../_shared/phase5.ts";
+import { CP_URL, asArray, asString, cleanString, cpAudit, cpGet, cpHeaders, cpPatch, gmailAccessToken, isRecord, json, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-gmail-inbound";
 const PUBSUB_TOKEN = Deno.env.get("GMAIL_PUBSUB_VERIFICATION_TOKEN") ?? "";
@@ -9,7 +9,11 @@ console.log(`[${FUNCTION_NAME}] ready`);
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return json({ ok: true });
   if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405);
-  if (!verifyPubSub(req)) return json({ error: "unauthorized" }, 401);
+  const authenticatedByPubSub = verifyPubSub(req);
+  if (!authenticatedByPubSub) {
+    const manualAuth = verifyWriteToken(req);
+    if (!manualAuth.ok) return json({ error: manualAuth.error ?? "unauthorized" }, manualAuth.status);
+  }
 
   let envelope: unknown;
   try { envelope = await req.json(); } catch { return json({ error: "body must be valid JSON" }, 400); }
@@ -21,13 +25,26 @@ Deno.serve(async (req) => {
     const cursor = cursorRows.find(isRecord)?.history_id;
     const token = await gmailAccessToken();
     const messageIds = cursor ? await listHistoryMessages(token, String(cursor)) : [];
-    await cpPatch("cc_gmail_history_cursor?id=eq.1", { history_id: historyId });
 
     const matched: string[] = [];
     for (const id of messageIds) {
-      const msg = await getMessage(token, id);
+      let msg: Record<string, unknown>;
+      try {
+        msg = await getMessage(token, id);
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        if (detail.includes("404") || detail.includes("not found") || detail.includes("notFound")) {
+          await cpAudit(null, FUNCTION_NAME, "gmail_inbound_message_unavailable", { gmail_message_id: id, detail });
+          continue;
+        }
+        throw e;
+      }
       const headers = headersMap(msg);
       const ccSendId = headers.get("x-cc-send-id") ?? null;
+      if (ccSendId) {
+        await cpAudit(null, FUNCTION_NAME, "gmail_inbound_outbound_skipped", { gmail_message_id: id, send_id: ccSendId });
+        continue;
+      }
       const inReplyTo = headers.get("in-reply-to") ?? headers.get("references") ?? null;
       const from = headers.get("from") ?? "";
       const gmailThreadId = asString(msg.threadId);
@@ -71,6 +88,8 @@ Deno.serve(async (req) => {
       matched.push(sendId);
     }
 
+    await cpPatch("cc_gmail_history_cursor?id=eq.1", { history_id: historyId });
+
     return json({ ok: true, history_id: historyId, processed_messages: messageIds.length, matched_send_ids: matched });
   } catch (e) {
     return json({ error: "gmail inbound failed", detail: e instanceof Error ? e.message : String(e) }, 500);
@@ -105,26 +124,49 @@ function extractHistoryId(envelope: unknown): string | null {
 }
 
 async function listHistoryMessages(token: string, startHistoryId: string): Promise<string[]> {
-  const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/history");
-  url.searchParams.set("startHistoryId", startHistoryId);
-  url.searchParams.set("historyTypes", "messageAdded");
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`Gmail history.list failed: ${r.status} ${await r.text()}`);
-  const payload = await r.json() as { history?: Array<{ messagesAdded?: Array<{ message?: { id?: string } }> }> };
   const ids = new Set<string>();
-  for (const h of payload.history ?? []) {
-    for (const added of h.messagesAdded ?? []) {
-      if (added.message?.id) ids.add(added.message.id);
+  let pageToken: string | undefined;
+
+  do {
+    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/history");
+    url.searchParams.set("startHistoryId", startHistoryId);
+    url.searchParams.set("historyTypes", "messageAdded");
+    url.searchParams.set("maxResults", "500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) throw new Error(`Gmail history.list failed: ${r.status} ${await r.text()}`);
+    const payload = await r.json() as { history?: Array<{ messagesAdded?: Array<{ message?: { id?: string } }> }>; nextPageToken?: string };
+    for (const h of payload.history ?? []) {
+      for (const added of h.messagesAdded ?? []) {
+        if (added.message?.id) ids.add(added.message.id);
+      }
     }
-  }
+    pageToken = payload.nextPageToken;
+  } while (pageToken);
+
   return [...ids];
 }
 
 async function getMessage(token: string, id: string): Promise<Record<string, unknown>> {
-  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`;
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`Gmail messages.get failed: ${r.status} ${await r.text()}`);
-  return await r.json() as Record<string, unknown>;
+  const fullUrl = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
+  fullUrl.searchParams.set("format", "full");
+  const r = await fetch(fullUrl, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.ok) return await r.json() as Record<string, unknown>;
+
+  const body = await r.text();
+  if (r.status === 403 && body.includes("Metadata scope")) {
+    const metadataUrl = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
+    metadataUrl.searchParams.set("format", "metadata");
+    for (const header of ["From", "In-Reply-To", "References", "X-CC-Send-Id"]) {
+      metadataUrl.searchParams.append("metadataHeaders", header);
+    }
+    const fallback = await fetch(metadataUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!fallback.ok) throw new Error(`Gmail messages.get metadata fallback failed: ${fallback.status} ${await fallback.text()}`);
+    return await fallback.json() as Record<string, unknown>;
+  }
+
+  throw new Error(`Gmail messages.get failed: ${r.status} ${body}`);
 }
 
 function headersMap(msg: Record<string, unknown>): Map<string, string> {
