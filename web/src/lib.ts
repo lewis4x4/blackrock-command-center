@@ -1830,6 +1830,9 @@ export interface RoutedDecisionSummary extends Record<string, unknown> {
   app_display_name: string | null;
   decision_external_ref: string;
   decision_title: string | null;
+  decision_body: string | null;
+  options_snapshot: DecisionOptionLike[];
+  risk_class: RiskClass | null;
   recipient_name: string | null;
   recipient_email: string | null;
   recipient_count: number;
@@ -2181,6 +2184,9 @@ function parseRoutedDecisionSummary(value: unknown): RoutedDecisionSummary {
     app_display_name: asString(value.app_display_name),
     decision_external_ref: decisionExternalRef,
     decision_title: asString(value.decision_title),
+    decision_body: asString(value.decision_body),
+    options_snapshot: Array.isArray(value.options_snapshot) ? value.options_snapshot.map(optionFromUnknown).filter((v): v is DecisionOptionLike => !!v) : [],
+    risk_class: RISK_CLASSES.has(asString(value.risk_class) as RiskClass) ? asString(value.risk_class) as RiskClass : null,
     recipient_name: asString(value.recipient_name),
     recipient_email: asString(value.recipient_email),
     recipient_count: asNumber(value.recipient_count) ?? 1,

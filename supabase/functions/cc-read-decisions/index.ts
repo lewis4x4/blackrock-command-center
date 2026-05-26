@@ -427,7 +427,7 @@ function lateReplySummary(row: unknown, appById: Map<string, AppRecord>): Record
   };
 }
 
-function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>): Record<string, unknown>[] {
+function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>, answeredKeys: Set<string>): Record<string, unknown>[] {
   const awaitingReplyStates = new Set(["sent", "delivered", "opened", "clicked", "reminded", "awaiting_clarify", "clarify_sent"]);
   const byDecision = new Map<string, RoutedAccumulator>();
 
@@ -438,6 +438,7 @@ function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>): Reco
     if (!appId || !ref || !state || !awaitingReplyStates.has(state)) continue;
 
     const key = `${appId}::${ref}`;
+    if (answeredKeys.has(key)) continue;
     const updatedAt = asString(row.updated_at) ?? asString(row.sent_at);
     const updatedMs = updatedAt ? Date.parse(updatedAt) : 0;
     const recipientEmail = asString(row.recipient_email);
@@ -462,6 +463,9 @@ function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>): Reco
         app_display_name: app?.app_display_name ?? null,
         decision_external_ref: ref,
         decision_title: asString(row.raw_decision_title),
+        decision_body: asString(row.raw_decision_body),
+        options_snapshot: Array.isArray(row.options_snapshot) ? row.options_snapshot : [],
+        risk_class: asString(row.risk_class),
         recipient_name: asString(row.recipient_name),
         recipient_email: recipientEmail,
         recipient_count: recipientEmails.size,
@@ -518,6 +522,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let apps: AppRecord[];
   let dpRows: DataPlaneRecord[];
   let answeredRecent: unknown[];
+  let answeredKeyRows: unknown[];
   let answeredSendRows: unknown[];
   let routedSendRows: unknown[];
   let pendingReviews: unknown[];
@@ -533,11 +538,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawIssueRows, rawPendingReviews, rawAnsweredSendRows, rawRoutedSendRows, rawLateReplyRows] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawAnsweredKeyRows, rawIssueRows, rawPendingReviews, rawAnsweredSendRows, rawRoutedSendRows, rawLateReplyRows] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
       cpGet("cc_decision_answers?select=id,issue_id,app_id,decision_external_ref,answer_value,answer_options_snapshot,rationale,risk_class,answered_by,answered_at,dispatched_at,registry_apps(short_code,display_name)&deleted_at=is.null&order=answered_at.desc&limit=20"),
+      appIdFilter
+        ? cpGet(`cc_decision_answers?select=app_id,decision_external_ref&deleted_at=is.null&app_id=in.(${appIdFilter})`)
+        : Promise.resolve([]),
       appIdFilter
         ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,source_ref,status,created_at,detail,auto_route_paused_at,auto_route_paused_by,auto_route_paused_reason,snoozed_until,snoozed_by&order=created_at.desc`)
         : Promise.resolve([]),
@@ -546,7 +554,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
       cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
       appIdFilter
-        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title&order=updated_at.desc`)
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title,raw_decision_body,options_snapshot,risk_class&order=updated_at.desc`)
         : Promise.resolve([]),
       appIdFilter
         ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.late_reply&deleted_at=is.null&resolved_at=is.null&status=in.(surfaced,triaging)&select=id,app_id,source_ref,status,severity,title,summary,detail,surfaced_at,last_seen_at,created_at,updated_at&order=last_seen_at.desc&limit=50`)
@@ -554,6 +562,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
+    answeredKeyRows = rawAnsweredKeyRows;
     answeredSendRows = rawAnsweredSendRows;
     routedSendRows = rawRoutedSendRows;
     pendingReviews = rawPendingReviews;
@@ -638,7 +647,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // answer; the operator should not have to keep seeing answered work.
   const answeredKeys = new Set<string>();
   const routedKeys = new Set<string>();
-  for (const row of answeredRecent.filter(isRecord)) {
+  for (const row of answeredKeyRows.filter(isRecord)) {
     const appIdValue = asString(row.app_id);
     const refValue = asString(row.decision_external_ref);
     if (appIdValue && refValue) answeredKeys.add(`${appIdValue}::${refValue}`);
@@ -691,7 +700,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   ).slice(0, limit);
 
   const appById = new Map(apps.map((app) => [app.app_id, app]));
-  const routedRecent = routedSummaries(routedSendRows, appById).slice(0, 20);
+  const routedRecent = routedSummaries(routedSendRows, appById, answeredKeys).slice(0, 20);
   const createdViaByAnswerId = new Map(
     answeredSendRows.filter(isRecord)
       .map((row) => [asString(row.decision_answer_id), asString(row.created_via)])

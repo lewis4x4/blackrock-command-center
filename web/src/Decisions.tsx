@@ -14,6 +14,7 @@ export type DecisionsViewHandle = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
+type RouteModalTarget = { appId: string; issueId: string | null; decision: Record<string, unknown> };
 
 const emptyDecisions: DecisionsPayload = {
   apps_reached: [],
@@ -35,6 +36,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
   const [sort, setSort] = useState<DecisionSort>('oldest');
   const [stateFilter, setStateFilter] = useState<DecisionStateFilter>('active');
   const [openDecision, setOpenDecision] = useState<DecisionRow | null>(null);
+  const [routeTarget, setRouteTarget] = useState<RouteModalTarget | null>(null);
   const [openReview, setOpenReview] = useState<PendingReviewSend | null>(null);
   const [lastOpenCount, setLastOpenCount] = useState(0);
 
@@ -102,11 +104,22 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onRetry={refresh}
         onOpen={setOpenDecision}
       />
-      <RoutedBand rows={payload.routed_recent ?? []} loading={state === 'loading'} />
+      <RoutedBand rows={payload.routed_recent ?? []} loading={state === 'loading'} onOpen={(row) => setRouteTarget(routeTargetFromRouted(row))} />
       <LateRepliesBand rows={payload.late_replies ?? []} loading={state === 'loading'} demo={demo} onResolved={refresh} />
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
       <AnsweredBand rows={payload.answered_recent} loading={state === 'loading'} />
       {openDecision && <DecisionDrawer decision={openDecision} demo={demo} onClose={() => setOpenDecision(null)} onAnswered={refresh} />}
+      {routeTarget && (
+        <DecisionRouteModal
+          open={!!routeTarget}
+          demo={demo}
+          appId={routeTarget.appId}
+          issueId={routeTarget.issueId}
+          decision={routeTarget.decision}
+          onClose={() => setRouteTarget(null)}
+          onSent={refresh}
+        />
+      )}
       <ExtractionReviewModal
         review={openReview}
         open={!!openReview}
@@ -305,7 +318,7 @@ function WiringNotes({ unwired, unreachable }: { unwired: DecisionsAppStatus[]; 
   );
 }
 
-function RoutedBand({ rows, loading }: { rows: RoutedDecisionSummary[]; loading: boolean }) {
+function RoutedBand({ rows, loading, onOpen }: { rows: RoutedDecisionSummary[]; loading: boolean; onOpen: (row: RoutedDecisionSummary) => void }) {
   if (!loading && rows.length === 0) return null;
   return (
     <section className="band agents-section">
@@ -333,12 +346,28 @@ function RoutedBand({ rows, loading }: { rows: RoutedDecisionSummary[]; loading:
                 <span>{routedStateLabel(row.state)}{row.recipient_count > 1 ? ` · ${row.recipient_count} recipients` : row.recipient_name ? ` · ${row.recipient_name}` : ''}</span>
               </div>
               <div className="answered-age">{ago(row.reminded_at ?? row.sent_at ?? row.updated_at) ?? '—'}</div>
+              <button className="btn-primary decision-route" style={{ width: '100%', minHeight: 44 }} type="button" onClick={() => onOpen(row)}>Resend</button>
             </div>
           ))}
         </div>
       )}
     </section>
   );
+}
+
+function routeTargetFromRouted(row: RoutedDecisionSummary): RouteModalTarget {
+  return {
+    appId: row.app_id,
+    issueId: row.issue_id,
+    decision: {
+      id: row.decision_external_ref,
+      external_ref: row.decision_external_ref,
+      title: row.decision_title ?? row.decision_external_ref,
+      summary: row.decision_body,
+      options: row.options_snapshot,
+      risk_class: row.risk_class ?? undefined,
+    },
+  };
 }
 
 function LateRepliesBand({ rows, loading, demo, onResolved }: { rows: LateReplyIssueSummary[]; loading: boolean; demo: boolean; onResolved: () => void | Promise<void> }) {

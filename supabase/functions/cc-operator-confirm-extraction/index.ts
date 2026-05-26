@@ -58,7 +58,7 @@ Deno.serve(async (req) => {
       p_actor: access.actor,
     });
 
-    const updated = await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null`, {
+    const updated = await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(extracting,replied,awaiting_clarify,clarify_sent,awaiting_operator_review)`, {
       state: "answered",
       operator_confirmed_by: access.actor,
       operator_confirmed_at: new Date().toISOString(),

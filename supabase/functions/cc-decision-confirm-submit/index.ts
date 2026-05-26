@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { cleanString, hmacSha256Hex, isRecord, json, rpc, RpcError, rpcErrorResponse, UUID_RE } from "../_shared/phase5.ts";
+import { cleanString, cpPatch, hmacSha256Hex, isRecord, json, rpc, RpcError, rpcErrorResponse, UUID_RE } from "../_shared/phase5.ts";
 
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
 const PUBLIC_APP_ORIGIN = new URL(Deno.env.get("CC_PUBLIC_DECISION_BASE_URL") ?? "https://blackrockai-command-center.netlify.app").origin;
@@ -35,6 +35,7 @@ Deno.serve(async (req) => {
       p_option_id: optionId,
       p_actor: "client-magic-link",
     });
+    await markSendAnswered(sendId, optionId, tokenHash, decisionAnswerIdFromResult(result));
     return publicJson(req, { result }, 200, {
       "Cache-Control": "no-store",
     });
@@ -43,6 +44,34 @@ Deno.serve(async (req) => {
     return publicJson(req, { error: "decision confirm failed" }, 500);
   }
 });
+
+async function markSendAnswered(sendId: string, optionId: string, tokenHash: string, decisionAnswerId: string): Promise<void> {
+  const tokenFilter = encodeURIComponent(JSON.stringify([{ option_id: optionId, token_hash: tokenHash }]));
+  await cpPatch(
+    `cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=in.(sent,delivered,opened,clicked,reminded,awaiting_clarify,clarify_sent,replied,extracting,awaiting_operator_review)&magic_link_tokens=cs.${tokenFilter}`,
+    {
+      state: "answered",
+      answered_at: new Date().toISOString(),
+      operator_confirmed_by: "client-magic-link",
+      operator_confirmed_at: new Date().toISOString(),
+      selected_option: optionId,
+      decision_answer_id: decisionAnswerId,
+      clicked_at: new Date().toISOString(),
+      last_error: null,
+    },
+  );
+}
+
+function decisionAnswerIdFromResult(result: unknown): string {
+  if (!isRecord(result)) throw new Error("decision confirm returned no result object");
+  const direct = cleanString(result.decision_answer_id, 80);
+  if (direct && UUID_RE.test(direct)) return direct;
+  const answer = isRecord(result.answer) ? cleanString(result.answer.decision_answer_id, 80) : null;
+  if (answer && UUID_RE.test(answer)) return answer;
+  const send = isRecord(result.send) ? cleanString(result.send.decision_answer_id, 80) : null;
+  if (send && UUID_RE.test(send)) return send;
+  throw new Error("decision confirm returned no decision_answer_id");
+}
 
 async function verifyCsrfToken(token: string, expectedSendId: string, expectedOptionId: string): Promise<{ ok: boolean; reason: string }> {
   const dot = token.lastIndexOf(".");
