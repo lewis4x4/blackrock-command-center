@@ -31,7 +31,7 @@ const cpHeaders = {
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-cc-write-token",
 };
 
 const BODY_KEYS = new Set(["short_code", "display_name", "project_ref", "project_url", "service_secret_ref", "readonly_secret_ref", "github_repo"]);
