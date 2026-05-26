@@ -346,7 +346,9 @@ function RoutedBand({ rows, loading, onOpen }: { rows: RoutedDecisionSummary[]; 
                 <span>{routedStateLabel(row.state)}{row.recipient_count > 1 ? ` · ${row.recipient_count} recipients` : row.recipient_name ? ` · ${row.recipient_name}` : ''}</span>
               </div>
               <div className="answered-age">{ago(row.reminded_at ?? row.sent_at ?? row.updated_at) ?? '—'}</div>
-              <button className="btn-primary decision-route" style={{ width: '100%', minHeight: 44 }} type="button" onClick={() => onOpen(row)}>Resend</button>
+              <div className="agents-hero-actions" style={{ justifyContent: 'flex-end' }}>
+                <button className="btn-primary" style={{ minHeight: 44 }} type="button" onClick={() => onOpen(row)}>Resend</button>
+              </div>
             </div>
           ))}
         </div>
