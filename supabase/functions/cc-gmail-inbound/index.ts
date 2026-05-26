@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { CP_URL, asArray, asString, cleanString, cpAudit, cpGet, cpHeaders, cpPatch, gmailAccessToken, isRecord, json, verifyWriteToken } from "../_shared/phase5.ts";
+import { CP_KEY, CP_URL, asArray, asString, cleanString, cpAudit, cpGet, cpHeaders, cpInsert, cpPatch, gmailAccessToken, isRecord, json, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-gmail-inbound";
 const PUBSUB_TOKEN = Deno.env.get("GMAIL_PUBSUB_VERIFICATION_TOKEN") ?? "";
@@ -67,13 +67,16 @@ Deno.serve(async (req) => {
         });
         if (updated.length === 0) {
           await insertExtraReply(sendId, id, replyText);
+          await maybeCreateLateReplyIssue(send, sendId, id, replyText, from);
           await cpAudit(appId, FUNCTION_NAME, id === asString(send.inbound_gmail_message_id) ? "decision_inbound_already_processed" : "decision_extra_reply_received", { send_id: sendId, gmail_message_id: id });
           continue;
         }
+        await maybeCreateLateReplyIssue(send, sendId, id, replyText, from);
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
         if (detail.includes("cc_decision_email_sends_inbound_msg_idx") || detail.includes("duplicate key value")) {
           await insertExtraReply(sendId, id, replyText);
+          await maybeCreateLateReplyIssue(send, sendId, id, replyText, from);
           await cpAudit(appId, FUNCTION_NAME, id === asString(send.inbound_gmail_message_id) ? "decision_inbound_already_processed" : "decision_extra_reply_received", { send_id: sendId, gmail_message_id: id });
           continue;
         }
@@ -249,6 +252,99 @@ function decodeBase64Url(value: string): string {
 
 function stripQuoted(value: string): string {
   return value.split(/\nOn .+ wrote:\n|\nFrom: .+\n/i)[0].replace(/\n>.*$/gm, "").trim();
+}
+
+async function maybeCreateLateReplyIssue(send: Record<string, unknown>, sendId: string, inboundMessageId: string, rawReplyText: string, from: string): Promise<void> {
+  const issueId = cleanString(send.issue_id, 80);
+  const appId = cleanString(send.app_id, 80);
+  if (!issueId || !appId) return;
+
+  const issueRows = await cpGet(`cc_issues?id=eq.${issueId}&deleted_at=is.null&select=id,status,title,source_ref,detail&limit=1`);
+  const issue = issueRows.find(isRecord);
+  const status = asString(issue?.status);
+  if (status !== "answered" && status !== "done") return;
+
+  const existing = await cpGet(`cc_issues?app_id=eq.${appId}&issue_type=eq.late_reply&source_ref=eq.${sendId}&deleted_at=is.null&resolved_at=is.null&select=id&limit=1`);
+  if (existing.some(isRecord)) return;
+
+  const senderEmail = extractEmail(from);
+  const senderName = extractSenderName(from);
+  const replyExcerpt = excerpt(rawReplyText, 500);
+  const decisionTitle = cleanString(send.raw_decision_title, 500) ?? asString(issue?.title) ?? "Answered decision";
+  const decisionRef = cleanString(send.decision_external_ref, 200) ?? asString(issue?.source_ref) ?? null;
+  const now = new Date().toISOString();
+
+  const inserted = await cpInsert<Record<string, unknown>>("cc_issues", {
+    app_id: appId,
+    issue_type: "late_reply",
+    source_ref: sendId,
+    status: "surfaced",
+    severity: "high",
+    title: `Late reply: ${decisionTitle}`,
+    summary: senderEmail ? `Late reply from ${senderName ?? senderEmail}` : "Late reply arrived after the decision was already closed.",
+    detail: {
+      send_id: sendId,
+      inbound_gmail_message_id: inboundMessageId,
+      reply_excerpt: replyExcerpt,
+      sender_name: senderName,
+      sender_email: senderEmail || null,
+      original_issue_id: issueId,
+      original_issue_status: status,
+      original_decision_ref: decisionRef,
+      original_decision_title: decisionTitle,
+      received_at: now,
+    },
+    context: {
+      detected_by: FUNCTION_NAME,
+      original_issue_id: issueId,
+    },
+    surfaced_at: now,
+    last_seen_at: now,
+  });
+  const lateIssue = inserted.find(isRecord);
+  const lateIssueId = asString(lateIssue?.id);
+
+  await cpAudit(appId, FUNCTION_NAME, "late_reply_arrived", {
+    issue_id: lateIssueId,
+    send_id: sendId,
+    original_issue_id: issueId,
+    decision_external_ref: decisionRef,
+    sender_email: senderEmail || null,
+    reply_excerpt: replyExcerpt,
+  });
+
+  await notifyLateReply(appId, lateIssueId, decisionTitle, senderName ?? senderEmail, replyExcerpt);
+}
+
+function extractSenderName(value: string): string | null {
+  const cleaned = value.replace(/<[^>]+>/g, "").replace(/^\"|\"$/g, "").trim();
+  return cleaned && cleaned !== extractEmail(value) ? cleaned : null;
+}
+
+function excerpt(value: string, max: number): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+async function notifyLateReply(appId: string, lateIssueId: string | null, decisionTitle: string, sender: string, replyExcerpt: string): Promise<void> {
+  try {
+    const r = await fetch(`${CP_URL}/functions/v1/cc-telegram-notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${CP_KEY}` },
+      body: JSON.stringify({
+        event_type: "late_reply_arrived",
+        severity: "high",
+        app_id: appId,
+        title: "Late decision reply arrived",
+        body: `${sender || "A recipient"} replied after “${decisionTitle}” was already closed. ${replyExcerpt}`,
+        deep_link: lateIssueId ? "/decisions#late-replies" : "/decisions",
+      }),
+    });
+    if (!r.ok) {
+      await cpAudit(appId, FUNCTION_NAME, "late_reply_telegram_notify_failed", { issue_id: lateIssueId, status: r.status, detail: await r.text() });
+    }
+  } catch (e) {
+    await cpAudit(appId, FUNCTION_NAME, "late_reply_telegram_notify_failed", { issue_id: lateIssueId, detail: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 async function insertExtraReply(sendId: string, inboundMessageId: string, rawReplyText: string): Promise<void> {

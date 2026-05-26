@@ -4,8 +4,8 @@ import { DecisionRouteModal } from './DecisionRouteModal';
 import { ExtractionReviewModal } from './ExtractionReviewModal';
 import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
-  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, setDecisionPause, setDecisionSnooze,
-  type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus,
+  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, resolveLateReply, setDecisionPause, setDecisionSnooze,
+  type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus, type LateReplyIssueSummary,
   type DecisionsFilters, type DecisionsPayload, type DecisionSort, type DecisionStateFilter, type OperatorClarifyExtractionPayload, type PendingReviewSend, type RoutedDecisionSummary,
 } from './lib';
 
@@ -21,6 +21,7 @@ const emptyDecisions: DecisionsPayload = {
   apps_unwired: [],
   decisions: [],
   routed_recent: [],
+  late_replies: [],
   answered_recent: [],
 };
 
@@ -102,6 +103,7 @@ export const DecisionsView = forwardRef<DecisionsViewHandle, { demo: boolean }>(
         onOpen={setOpenDecision}
       />
       <RoutedBand rows={payload.routed_recent ?? []} loading={state === 'loading'} />
+      <LateRepliesBand rows={payload.late_replies ?? []} loading={state === 'loading'} demo={demo} onResolved={refresh} />
       <WiringNotes unwired={payload.apps_unwired} unreachable={payload.apps_unreachable} />
       <AnsweredBand rows={payload.answered_recent} loading={state === 'loading'} />
       {openDecision && <DecisionDrawer decision={openDecision} demo={demo} onClose={() => setOpenDecision(null)} onAnswered={refresh} />}
@@ -339,11 +341,68 @@ function RoutedBand({ rows, loading }: { rows: RoutedDecisionSummary[]; loading:
   );
 }
 
+function LateRepliesBand({ rows, loading, demo, onResolved }: { rows: LateReplyIssueSummary[]; loading: boolean; demo: boolean; onResolved: () => void | Promise<void> }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  async function resolve(row: LateReplyIssueSummary, action: 'apply' | 'dismiss') {
+    if (busyId) return;
+    setBusyId(row.issue_id);
+    try {
+      await resolveLateReply(row.issue_id, action, demo);
+      await onResolved();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (!loading && rows.length === 0) return null;
+  return (
+    <section className="band agents-section" id="late-replies">
+      <div className="band-head">
+        <span className="band-num">3</span>
+        <div>
+          <div className="band-title">Late replies</div>
+          <div className="band-sub">Replies that arrived after the original decision was already answered or done.</div>
+        </div>
+        <span className="count-chip">{rows.length}</span>
+      </div>
+      {loading ? <SkeletonCards /> : (
+        <div className="answered-list">
+          {rows.map((row) => {
+            const sender = row.sender_name || row.sender_email || 'Unknown sender';
+            const busy = busyId === row.issue_id;
+            return (
+              <div className="answered-row" key={row.issue_id}>
+                <div className="agents-app">
+                  <span className="badge" style={{ background: colorFor(row.app_short_code ?? 'APP') }}>{(row.app_short_code ?? 'A')[0]}</span>
+                  <div>
+                    <b>{row.app_display_name ?? row.app_short_code ?? 'App'}</b>
+                    <span>{row.app_short_code ?? '—'}</span>
+                  </div>
+                </div>
+                <div className="answered-main">
+                  <b>{row.original_decision_title ?? row.original_decision_ref ?? 'Answered decision'}</b>
+                  <span>{sender} · {row.reply_excerpt ? `“${row.reply_excerpt}”` : 'No reply excerpt captured.'}</span>
+                </div>
+                <div className="answered-age">{ago(row.last_seen_at ?? row.created_at ?? row.surfaced_at) ?? '—'}</div>
+                <div className="agents-hero-actions" style={{ justifyContent: 'flex-end' }}>
+                  <button className="btn-primary" disabled={busy} onClick={() => void resolve(row, 'apply')}>{busy ? 'Saving…' : 'Apply as answer'}</button>
+                  <button className="ghost-btn" disabled={busy} onClick={() => void resolve(row, 'dismiss')}>Dismiss as noise</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; loading: boolean }) {
   return (
     <section className="band agents-section">
       <div className="band-head">
-        <span className="band-num">3</span>
+        <span className="band-num">4</span>
         <div>
           <div className="band-title">Recently answered</div>
           <div className="band-sub">Latest operator answers recorded in the control plane ledger.</div>

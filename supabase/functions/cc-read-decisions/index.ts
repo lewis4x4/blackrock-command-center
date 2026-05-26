@@ -401,6 +401,32 @@ type RoutedAccumulator = {
   recipientEmails: Set<string>;
 };
 
+function lateReplySummary(row: unknown, appById: Map<string, AppRecord>): Record<string, unknown> {
+  const rec = isRecord(row) ? row : {};
+  const appId = asString(rec.app_id) ?? "";
+  const app = appById.get(appId);
+  const detail = isRecord(rec.detail) ? rec.detail : {};
+  return {
+    issue_id: asString(rec.id),
+    app_id: appId,
+    app_short_code: app?.app_short_code ?? null,
+    app_display_name: app?.app_display_name ?? null,
+    send_id: asString(detail.send_id) ?? asString(rec.source_ref),
+    source_ref: asString(rec.source_ref),
+    original_decision_ref: asString(detail.original_decision_ref),
+    original_decision_title: asString(detail.original_decision_title) ?? asString(rec.title),
+    reply_excerpt: asString(detail.reply_excerpt) ?? asString(rec.summary),
+    sender_name: asString(detail.sender_name),
+    sender_email: asString(detail.sender_email),
+    status: asString(rec.status),
+    severity: asString(rec.severity),
+    surfaced_at: asString(rec.surfaced_at),
+    last_seen_at: asString(rec.last_seen_at),
+    created_at: asString(rec.created_at),
+    updated_at: asString(rec.updated_at),
+  };
+}
+
 function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>): Record<string, unknown>[] {
   const awaitingReplyStates = new Set(["sent", "delivered", "opened", "clicked", "reminded", "awaiting_clarify", "clarify_sent"]);
   const byDecision = new Map<string, RoutedAccumulator>();
@@ -495,6 +521,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let answeredSendRows: unknown[];
   let routedSendRows: unknown[];
   let pendingReviews: unknown[];
+  let lateReplyRows: unknown[];
   let aggregateIssueByApp: Map<string, string> = new Map();
   let issueById = new Map<string, Record<string, unknown>>();
   let issueByDecisionRef = new Map<string, Record<string, unknown>>();
@@ -506,7 +533,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps = appRows.map((row) => isRecord(row) ? appIdentity(row) : null).filter((row): row is AppRecord => !!row);
 
     const appIdFilter = apps.map((app) => app.app_id).join(",");
-    const [rawDpRows, rawAnsweredRecent, rawIssueRows, rawPendingReviews, rawAnsweredSendRows, rawRoutedSendRows] = await Promise.all([
+    const [rawDpRows, rawAnsweredRecent, rawIssueRows, rawPendingReviews, rawAnsweredSendRows, rawRoutedSendRows, rawLateReplyRows] = await Promise.all([
       appIdFilter
         ? cpGet(`registry_app_supabase?app_id=in.(${appIdFilter})&select=app_id,project_url,project_ref,readonly_secret_ref,service_secret_ref`)
         : Promise.resolve([]),
@@ -521,12 +548,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       appIdFilter
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title&order=updated_at.desc`)
         : Promise.resolve([]),
+      appIdFilter
+        ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.late_reply&deleted_at=is.null&resolved_at=is.null&status=in.(surfaced,triaging)&select=id,app_id,source_ref,status,severity,title,summary,detail,surfaced_at,last_seen_at,created_at,updated_at&order=last_seen_at.desc&limit=50`)
+        : Promise.resolve([]),
     ]);
     dpRows = rawDpRows.filter(isRecord) as DataPlaneRecord[];
     answeredRecent = rawAnsweredRecent;
     answeredSendRows = rawAnsweredSendRows;
     routedSendRows = rawRoutedSendRows;
     pendingReviews = rawPendingReviews;
+    lateReplyRows = rawLateReplyRows;
     // Map: app_id -> most recent aggregate open_decision cc_issues.id, plus
     // per-decision issue rows keyed by their app-local decision ref. Routed
     // decisions can keep showing up in the app export until the app ingests the
@@ -686,6 +717,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     apps_unwired: appsUnwired,
     decisions,
     routed_recent: routedRecent,
+    late_replies: lateReplyRows.filter(isRecord).map((row) => lateReplySummary(row, appById)),
     answered_recent: answeredRecent.map((row) => {
       const summary = answeredSummary(row);
       const id = asString(summary.id);
@@ -748,6 +780,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         apps_unwired: appsUnwired.length,
         decisions: decisions.length,
         pending_reviews: pendingReviews.length,
+        late_replies: lateReplyRows.length,
         filters: { app_id: appId, owner_kind: ownerFilter, max_age_days: maxAgeDays, limit },
       },
     });

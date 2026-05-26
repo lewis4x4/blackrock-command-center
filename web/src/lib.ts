@@ -1802,6 +1802,26 @@ export interface AnsweredDecisionSummary extends Record<string, unknown> {
   created_via?: 'manual' | 'auto_route';
 }
 
+export interface LateReplyIssueSummary extends Record<string, unknown> {
+  issue_id: string;
+  app_id: string;
+  app_short_code: string | null;
+  app_display_name: string | null;
+  send_id: string | null;
+  source_ref: string | null;
+  original_decision_ref: string | null;
+  original_decision_title: string | null;
+  reply_excerpt: string | null;
+  sender_name: string | null;
+  sender_email: string | null;
+  status: IssueStatus;
+  severity: IssueSeverity;
+  surfaced_at: string | null;
+  last_seen_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface RoutedDecisionSummary extends Record<string, unknown> {
   send_id: string;
   issue_id: string | null;
@@ -1825,6 +1845,7 @@ export interface DecisionsPayload {
   apps_unwired: DecisionsAppStatus[];
   decisions: DecisionRow[];
   routed_recent?: RoutedDecisionSummary[];
+  late_replies?: LateReplyIssueSummary[];
   answered_recent: AnsweredDecisionSummary[];
   pending_reviews?: PendingReviewSend[];
   generated_at?: string;
@@ -2014,12 +2035,35 @@ const DEMO_ALL_DECISIONS: DecisionAdminRow[] = [
   },
 ];
 
+const DEMO_LATE_REPLIES: LateReplyIssueSummary[] = [
+  {
+    issue_id: 'demo-late-qep-portal-copy',
+    app_id: 'qep',
+    app_short_code: 'QEP',
+    app_display_name: 'QEP OS',
+    send_id: 'demo-send-q11',
+    source_ref: 'demo-send-q11',
+    original_decision_ref: 'Q11',
+    original_decision_title: 'Portal fallback copy',
+    reply_excerpt: 'Actually, let’s keep the OEM terms in the fallback copy so it matches what the reps already say.',
+    sender_name: 'Rylee',
+    sender_email: 'rylee@qep.com',
+    status: 'surfaced',
+    severity: 'high',
+    surfaced_at: new Date(Date.now() - 38 * 60_000).toISOString(),
+    last_seen_at: new Date(Date.now() - 38 * 60_000).toISOString(),
+    created_at: new Date(Date.now() - 38 * 60_000).toISOString(),
+    updated_at: new Date(Date.now() - 38 * 60_000).toISOString(),
+  },
+];
+
 const emptyDecisionsPayload: DecisionsPayload = {
   apps_reached: [],
   apps_unreachable: [],
   apps_unwired: [],
   decisions: [],
   routed_recent: [],
+  late_replies: [],
   answered_recent: [],
   pending_reviews: [],
 };
@@ -2087,6 +2131,35 @@ function parseAnsweredDecisionSummary(value: unknown): AnsweredDecisionSummary {
     answered_at: answeredAt,
     dispatched_at: asString(value.dispatched_at),
     created_via: asString(value.created_via) === 'auto_route' ? 'auto_route' : 'manual',
+  };
+}
+
+function parseLateReplyIssueSummary(value: unknown): LateReplyIssueSummary {
+  const rec = asRecord(value);
+  const issueId = asString(rec.issue_id);
+  const appId = asString(rec.app_id);
+  const status = asString(rec.status);
+  const severity = asString(rec.severity);
+  if (!issueId || !appId) throw new Error('cc-read-decisions late reply row is missing required fields');
+  return {
+    ...rec,
+    issue_id: issueId,
+    app_id: appId,
+    app_short_code: asString(rec.app_short_code),
+    app_display_name: asString(rec.app_display_name),
+    send_id: asString(rec.send_id),
+    source_ref: asString(rec.source_ref),
+    original_decision_ref: asString(rec.original_decision_ref),
+    original_decision_title: asString(rec.original_decision_title),
+    reply_excerpt: asString(rec.reply_excerpt),
+    sender_name: asString(rec.sender_name),
+    sender_email: asString(rec.sender_email),
+    status: ISSUE_STATUSES.has(status as IssueStatus) ? status as IssueStatus : 'surfaced',
+    severity: ISSUE_SEVERITIES.has(severity as IssueSeverity) ? severity as IssueSeverity : 'high',
+    surfaced_at: asString(rec.surfaced_at),
+    last_seen_at: asString(rec.last_seen_at),
+    created_at: asString(rec.created_at),
+    updated_at: asString(rec.updated_at),
   };
 }
 
@@ -2164,6 +2237,7 @@ function parseDecisionsPayload(value: unknown): DecisionsPayload {
     apps_unwired: Array.isArray(value.apps_unwired) ? value.apps_unwired.map(parseDecisionsAppStatus) : [],
     decisions: value.decisions.map(parseDecisionRow),
     routed_recent: Array.isArray(value.routed_recent) ? value.routed_recent.map(parseRoutedDecisionSummary) : [],
+    late_replies: Array.isArray(value.late_replies) ? value.late_replies.map(parseLateReplyIssueSummary) : [],
     answered_recent: value.answered_recent.map(parseAnsweredDecisionSummary),
     pending_reviews: Array.isArray(value.pending_reviews) ? value.pending_reviews.map(parsePendingReviewSend) : [],
     generated_at: asString(value.generated_at) ?? undefined,
@@ -2318,6 +2392,7 @@ function demoDecisionsPayload(filters: DecisionsFilters): DecisionsPayload {
     ...structuredClone(emptyDecisionsPayload),
     apps_reached: DEMO_APPS.map((app) => ({ app_id: app.id, app_short_code: app.short_code, app_display_name: app.display_name, reason: 'demo' })),
     decisions,
+    late_replies: structuredClone(DEMO_LATE_REPLIES).filter((row) => row.status === 'surfaced' || row.status === 'triaging'),
     answered_recent: [],
     pending_reviews: structuredClone(DEMO_PENDING_REVIEWS),
     generated_at: new Date().toISOString(),
@@ -2333,6 +2408,12 @@ export async function loadDecisions(filters: DecisionsFilters, demo: boolean): P
 export async function loadAllDecisions(demo: boolean): Promise<AllDecisionsPayload> {
   if (demo) return { decisions: structuredClone(DEMO_ALL_DECISIONS), generated_at: new Date().toISOString() };
   return parseAllDecisionsPayload(await fetchJson('cc-read-all-decisions'));
+}
+
+
+export async function loadLateReplies(demo: boolean): Promise<LateReplyIssueSummary[]> {
+  const payload = await loadDecisions({}, demo);
+  return payload.late_replies ?? [];
 }
 
 export async function loadPendingReviews(demo: boolean): Promise<PendingReviewSend[]> {
@@ -2357,6 +2438,18 @@ export interface OperatorClarifyExtractionPayload {
   body: string;
   include_buttons: boolean;
   regenerate_tokens: boolean;
+}
+
+
+export async function resolveLateReply(issue_id: string, action: 'apply' | 'dismiss', demo = false): Promise<unknown> {
+  if (demo) {
+    const row = DEMO_LATE_REPLIES.find((item) => item.issue_id === issue_id);
+    if (!row) throw new Error('demo late reply not found');
+    row.status = action === 'apply' ? 'answered' : 'dismissed';
+    row.updated_at = new Date().toISOString();
+    return { issue: structuredClone(row), action };
+  }
+  return postJson('cc-resolve-late-reply', { issue_id, action });
 }
 
 export async function confirmExtraction(send_id: string, option_id: string, rationale?: string | null, demo = false): Promise<unknown> {

@@ -40,6 +40,7 @@ Deno.serve(async (req) => {
       risk_class: send.risk_class,
       actor: access.actor,
       decision_external_ref: send.decision_external_ref,
+      answer_source: "client_reply",
     });
 
     const decisionAnswerId = cleanString(answer?.decision_answer_id, 80);
