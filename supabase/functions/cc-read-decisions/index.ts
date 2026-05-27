@@ -73,7 +73,7 @@ class DataPlaneRpcError extends Error {
 const jwkCache = new Map<string, VerifyKey>();
 
 function buildJsonResponse(body: unknown, status = 200, accessCheck: "noop" | "pass" = "noop"): Response {
-  return new Response(JSON.stringify(body, null, 2), {
+  return new Response(JSON.stringify(body), {
     status,
     headers: {
       ...corsHeaders,
@@ -551,8 +551,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         ? cpGet(`cc_issues?app_id=in.(${appIdFilter})&issue_type=eq.open_decision&deleted_at=is.null&status=in.(surfaced,triaging,answered,work_order_created,dispatched,building,pr_open,routed_to_client,gated)&select=id,app_id,source_ref,status,created_at,detail,auto_route_paused_at,auto_route_paused_by,auto_route_paused_reason,snoozed_until,snoozed_by&order=created_at.desc`)
         : Promise.resolve([]),
       appId
-        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc`)
-        : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc"),
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc&limit=100`)
+        : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc&limit=100"),
       cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
       appIdFilter
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title,raw_decision_body,options_snapshot,risk_class&order=updated_at.desc`)

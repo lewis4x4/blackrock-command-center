@@ -43,7 +43,7 @@ type VerifyKey = CryptoKey | Uint8Array;
 const jwkCache = new Map<string, VerifyKey>();
 
 function buildJsonResponse(body: unknown, status = 200, accessCheck: "noop" | "pass" = "noop"): Response {
-  return new Response(JSON.stringify(body, null, 2), {
+  return new Response(JSON.stringify(body), {
     status,
     headers: {
       ...corsHeaders,
@@ -199,13 +199,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let issueRows: unknown[];
   try {
     appsRows = await cpGet("v_command_center_home?select=*");
-    const appCount = Math.max(1, appsRows.length);
-    [appFlags, integrationRows, snapshotRows, issueRows] = await Promise.all([
-      cpGet("registry_apps?select=id,auto_route_decisions,onboarding_steps&deleted_at=is.null"),
-      cpGet("registry_app_integrations?select=app_id,status"),
-      cpGet(`registry_app_snapshots?select=app_id,captured_at,roadmap_counts&order=captured_at.desc&limit=${appCount * 2}`),
-      cpGet("cc_issues?select=id,app_id,issue_type,source_ref,status,severity,title,summary,surfaced_at,last_seen_at,created_at,updated_at&resolved_at=is.null&deleted_at=is.null&status=not.in.(done,dismissed)&order=surfaced_at.desc"),
-    ]);
+    const appIds = appsRows
+      .map((row) => isRecord(row) ? asString(row.id) : null)
+      .filter((id): id is string => !!id);
+    const appCount = Math.max(1, appIds.length);
+    const appIdFilter = appIds.join(",");
+    [appFlags, integrationRows, snapshotRows, issueRows] = appIdFilter ? await Promise.all([
+      cpGet(`registry_apps?id=in.(${appIdFilter})&select=id,auto_route_decisions,onboarding_steps&deleted_at=is.null`),
+      cpGet(`registry_app_integrations?app_id=in.(${appIdFilter})&select=app_id,status`),
+      cpGet(`registry_app_snapshots?app_id=in.(${appIdFilter})&select=app_id,captured_at,roadmap_counts&order=captured_at.desc&limit=${appCount * 2}`),
+      cpGet(`cc_issues?app_id=in.(${appIdFilter})&select=id,app_id,issue_type,source_ref,status,severity,title,summary,surfaced_at,last_seen_at,created_at,updated_at&resolved_at=is.null&deleted_at=is.null&status=not.in.(done,dismissed)&order=surfaced_at.desc&limit=100`),
+    ]) : [[], [], [], []];
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return buildJsonResponse({ error: "database read failed", detail: msg }, 500, access.headerValue);

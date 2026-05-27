@@ -70,7 +70,7 @@ class DataPlaneRpcError extends Error {
 const jwkCache = new Map<string, VerifyKey>();
 
 function buildJsonResponse(body: unknown, status = 200, accessCheck: "noop" | "pass" = "noop"): Response {
-  return new Response(JSON.stringify(body, null, 2), {
+  return new Response(JSON.stringify(body), {
     status,
     headers: {
       ...corsHeaders,
@@ -207,6 +207,7 @@ async function callDetail(projectUrl: string, credential: DataPlaneKey, section:
     method: "POST",
     headers: { apikey: credential.key, Authorization: `Bearer ${credential.key}`, "Content-Type": "application/json" },
     body: JSON.stringify({ p_section: section, p_cursor: cursor }),
+    signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new DataPlaneRpcError(r.status, await r.text(), credential.keyClass);
   return r.json();

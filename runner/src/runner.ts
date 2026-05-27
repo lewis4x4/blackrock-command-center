@@ -405,8 +405,18 @@ export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, o
   });
 
   try {
-    const run = await controlPlane.createAgentRun(workOrder.id, RUNNER_ADAPTER);
-    runId = run.id;
+    const [runResult, installationIdResult, workspaceResult] = await Promise.allSettled([
+      controlPlane.createAgentRun(workOrder.id, RUNNER_ADAPTER),
+      controlPlane.getGitHubInstallationId(workOrder.app_id),
+      workspaceManager.create(workOrder.id),
+    ]);
+    if (workspaceResult.status === "fulfilled") workspace = workspaceResult.value;
+    if (runResult.status === "fulfilled") runId = runResult.value.id;
+    if (runResult.status === "rejected") throw runResult.reason;
+    if (installationIdResult.status === "rejected") throw installationIdResult.reason;
+    if (workspaceResult.status === "rejected") throw workspaceResult.reason;
+    if (!workspace) throw new Error("workspace creation returned no workspace");
+    const installationId = installationIdResult.value;
     leaseMonitor = new LeaseMonitor({
       controlPlane,
       workOrderId: workOrder.id,
@@ -418,8 +428,6 @@ export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, o
     leaseMonitor.start();
 
     leaseMonitor.assertActive();
-    const installationId = await controlPlane.getGitHubInstallationId(workOrder.app_id);
-    leaseMonitor.assertActive();
     const installationToken = await tokenProvider.mintInstallationToken(workOrder.target_repo, installationId);
     logger.info("minted GitHub installation token", {
       work_order_id: workOrder.id,
@@ -429,7 +437,6 @@ export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, o
     });
 
     leaseMonitor.assertActive();
-    workspace = await workspaceManager.create(workOrder.id);
     await workspaceManager.cloneRepository(workspace, workOrder.target_repo, workOrder.target_branch, installationToken.token);
 
     leaseMonitor.assertActive();
