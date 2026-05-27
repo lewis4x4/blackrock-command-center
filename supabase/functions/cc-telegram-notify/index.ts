@@ -66,25 +66,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") return json({ ok: true });
   if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405, ACCESS_REQUIRED ? "pass" : "noop");
 
+  const auth = await verifyCaller(req);
+  if (!auth.ok) return json({ error: auth.error ?? "unauthorized" }, auth.status, auth.headerValue);
+
   let rawBody: unknown;
   try {
     rawBody = await req.json();
   } catch {
-    return json({ error: "body must be valid JSON" }, 400, ACCESS_REQUIRED ? "pass" : "noop");
+    return json({ error: "body must be valid JSON" }, 400, auth.headerValue);
   }
 
   const parsed = parsePayload(rawBody);
-  if (!parsed.ok) return json({ error: parsed.error }, 400, ACCESS_REQUIRED ? "pass" : "noop");
+  if (!parsed.ok) return json({ error: parsed.error }, 400, auth.headerValue);
 
   const token = Deno.env.get("TELEGRAM_BOT_TOKEN")?.trim() ?? "";
   const chatId = Deno.env.get("TELEGRAM_OPERATOR_CHAT_ID")?.trim() ?? "";
   if (!token || !chatId) {
     console.log(`[${FUNCTION_NAME}] skipped: telegram_disabled`, { event_type: parsed.payload.event_type });
-    return json({ ok: true, skipped: "telegram_disabled" });
+    return json({ ok: true, skipped: "telegram_disabled" }, 200, auth.headerValue);
   }
-
-  const auth = await verifyCaller(req);
-  if (!auth.ok) return json({ error: auth.error ?? "unauthorized" }, auth.status, auth.headerValue);
 
   const gate = shouldNotify(parsed.payload.event_type, parsed.payload.severity);
   if (!gate.notify) {

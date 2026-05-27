@@ -10,6 +10,12 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-aggregator-token",
+};
+
 type ArtifactKind =
   | "doc"
   | "migration"
@@ -85,7 +91,7 @@ function isUniqueViolationError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   try {
     const parsed = JSON.parse(error.message) as { status?: number; detail?: string };
-    return parsed.status === 409 && parsed.detail.includes('"code":"23505"');
+    return parsed.status === 409 && typeof parsed.detail === "string" && parsed.detail.includes('"code":"23505"');
   } catch {
     return false;
   }
@@ -94,7 +100,14 @@ function isUniqueViolationError(error: unknown): boolean {
 function bad(message: string, status = 400): Response {
   return new Response(JSON.stringify({ error: message }), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function ok(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 }
 
@@ -125,7 +138,8 @@ function validateItem(raw: unknown): IndexItem {
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") return bad("POST only", 405);
+  if (req.method === "OPTIONS") return ok({ ok: true });
+  if (req.method !== "POST") return bad("POST or OPTIONS only", 405);
 
   const presented = req.headers.get("x-aggregator-token") ?? "";
   if (!TRIGGER_TOKEN || presented !== TRIGGER_TOKEN) return bad("unauthorized", 401);
@@ -306,20 +320,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // audit best-effort
   });
 
-  return new Response(
-    JSON.stringify(
-      {
-        scanned_at: scannedAt,
-        indexed: payload.items.length,
-        inserted,
-        updated,
-        pruned,
-        failed,
-        errors,
-      },
-      null,
-      2,
-    ),
-    { headers: { "Content-Type": "application/json" } },
-  );
+  return ok({
+    scanned_at: scannedAt,
+    indexed: payload.items.length,
+    inserted,
+    updated,
+    pruned,
+    failed,
+    errors,
+  });
 });

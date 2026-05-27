@@ -351,11 +351,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ACCESS_REQUIRED ? req.headers.get("Cf-Access-Jwt-Assertion") : req.headers.get("x-cc-read-token"),
   );
   if (!access.ok) {
+    return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
+  }
 
   const writeAuth = verifyWriteToken(req);
   if (!writeAuth.ok) return buildJsonResponse({ error: writeAuth.error ?? "forbidden" }, writeAuth.status, access.headerValue);
-    return buildJsonResponse({ error: access.error ?? "unauthorized" }, access.status, access.headerValue);
-  }
 
   let parsedJson: unknown;
   try {

@@ -36,6 +36,19 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-aggregator-token",
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 async function cpGet(path: string): Promise<any[]> {
   const r = await fetch(`${CP_URL}/rest/v1/${path}`, { headers: cpHeaders });
   if (!r.ok) throw new Error(`control-plane GET ${path} -> ${r.status} ${await r.text()}`);
@@ -137,20 +150,13 @@ async function pollApp(app: any): Promise<PollResult> {
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "POST only" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (req.method === "OPTIONS") return json({ ok: true });
+  if (req.method !== "POST") return json({ error: "POST or OPTIONS only" }, 405);
 
   // Custom auth — constant-ish shared-secret check.
   const presented = req.headers.get("x-aggregator-token") ?? "";
   if (!TRIGGER_TOKEN || presented !== TRIGGER_TOKEN) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      status: 401,
-      headers: { "Content-Type": "application/json" },
-    });
+    return json({ error: "unauthorized" }, 401);
   }
 
   const startedAt = new Date().toISOString();
@@ -162,10 +168,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return new Response(JSON.stringify({ error: `registry read failed: ${msg}` }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return json({ error: `registry read failed: ${msg}` }, 500);
   }
 
   const results: any[] = [];
@@ -237,8 +240,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const ok = results.filter((r) => r.ok).length;
-  return new Response(
-    JSON.stringify({ started_at: startedAt, polled: apps.length, ok, failed: apps.length - ok, results }, null, 2),
-    { headers: { "Content-Type": "application/json" } },
-  );
+  return json({ started_at: startedAt, polled: apps.length, ok, failed: apps.length - ok, results });
 });

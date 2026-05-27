@@ -38,7 +38,11 @@ Deno.serve(async (req) => {
 
     const stored = await storeSupabaseSecret(refreshToken);
     if (!stored.ok) {
-      return page("Refresh token captured — manual secret set needed", `Run: <code>supabase secrets set GMAIL_OAUTH_REFRESH_TOKEN='${escape(refreshToken)}' --project-ref ${PROJECT_REF}</code><br/><br/>Automatic secret storage failed: ${escape(stored.error)}`, 200);
+      return page(
+        "Refresh token captured — automatic storage failed",
+        `The callback received a refresh token, but automatic Supabase secret storage failed. For safety, the token is not displayed in the browser. Fix SUPABASE_ACCESS_TOKEN / project permissions, revoke this incomplete Gmail grant if needed, then restart OAuth consent.<br/><br/>Automatic secret storage failed: ${escape(stored.error)}`,
+        200,
+      );
     }
 
     return page("Gmail OAuth is connected", "Refresh token stored as Supabase secret GMAIL_OAUTH_REFRESH_TOKEN. You can close this tab.", 200);
