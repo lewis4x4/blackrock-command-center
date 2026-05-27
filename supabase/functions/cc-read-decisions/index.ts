@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jsr:@panva/jose@^6";
+import { corsHeaders, getDataPlaneSecret } from "../_shared/phase5.ts";
 
 // Browser read path for the Decisions nav page. Federated: fans out to each
 // registered app's cc_export_detail('decisions') contract and keeps client
@@ -28,11 +29,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
-};
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -123,6 +119,13 @@ async function cpInsert(table: string, row: unknown): Promise<void> {
   if (!r.ok) throw new Error(`control-plane INSERT ${table} -> ${r.status} ${await r.text()}`);
 }
 
+async function cpRpc<T = unknown>(name: string, body: Record<string, unknown>): Promise<T> {
+  const r = await fetch(`${CP_URL}/rest/v1/rpc/${name}`, { method: "POST", headers: cpHeaders, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`control-plane RPC ${name} -> ${r.status} ${await r.text()}`);
+  const text = await r.text();
+  return text ? JSON.parse(text) as T : null as T;
+}
+
 async function loadJwksIntoCache(teamDomain: string): Promise<void> {
   const url = `https://${teamDomain}/cdn-cgi/access/certs`;
   const r = await fetch(url);
@@ -200,7 +203,7 @@ function resolveDataPlaneKeys(dp: Record<string, unknown>): DataPlaneKey[] {
     { secretName: serviceSecretName, keyClass: "service_role" as const },
   ]) {
     if (!candidate.secretName) continue;
-    const key = Deno.env.get(candidate.secretName);
+    const key = getDataPlaneSecret(candidate.secretName);
     if (key) keys.push({ key, keyClass: candidate.keyClass, secretName: candidate.secretName });
   }
 
@@ -427,6 +430,55 @@ function lateReplySummary(row: unknown, appById: Map<string, AppRecord>): Record
   };
 }
 
+function decisionSuppressionKey(decision: Record<string, unknown>): string | null {
+  const appIdValue = asString(decision.app_id);
+  const refValue = asString(decision.id) ?? asString(decision.external_ref) ?? asString(decision.decision_id);
+  return appIdValue && refValue ? `${appIdValue}::${refValue}` : null;
+}
+
+function compareSets(left: Set<string>, right: Set<string>, candidateKeys: Set<string>): string[] {
+  const diff: string[] = [];
+  for (const key of left) {
+    if (!candidateKeys.has(key)) continue;
+    if (!right.has(key)) diff.push(key);
+  }
+  return diff.sort();
+}
+
+async function auditSuppressionShadow(appId: string | null, apps: AppRecord[], candidateKeys: Set<string>, liveSuppressedKeys: Set<string>): Promise<void> {
+  if (apps.length === 0 || candidateKeys.size === 0) return;
+  try {
+    const rows = await cpRpc<unknown[]>("cc_decision_open_set", { p_app_ids: apps.map((app) => app.app_id) });
+    const rpcSuppressedKeys = new Set<string>();
+    for (const row of asArray(rows).filter(isRecord)) {
+      const rowAppId = asString(row.app_id);
+      const ref = asString(row.decision_external_ref);
+      if (rowAppId && ref) rpcSuppressedKeys.add(`${rowAppId}::${ref}`);
+    }
+    const missingFromRpc = compareSets(liveSuppressedKeys, rpcSuppressedKeys, candidateKeys);
+    const extraFromRpc = compareSets(rpcSuppressedKeys, liveSuppressedKeys, candidateKeys);
+    if (missingFromRpc.length === 0 && extraFromRpc.length === 0) return;
+    await cpInsert("cc_audit_events", {
+      app_id: appId,
+      actor: FUNCTION_NAME,
+      event_type: "suppression_query_drift",
+      detail: {
+        app_ids: apps.map((app) => app.app_id),
+        candidate_count: candidateKeys.size,
+        live_suppressed_count: [...liveSuppressedKeys].filter((key) => candidateKeys.has(key)).length,
+        rpc_suppressed_count: [...rpcSuppressedKeys].filter((key) => candidateKeys.has(key)).length,
+        missing_from_rpc_count: missingFromRpc.length,
+        extra_from_rpc_count: extraFromRpc.length,
+        missing_from_rpc: missingFromRpc.slice(0, 50),
+        extra_from_rpc: extraFromRpc.slice(0, 50),
+      },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[${FUNCTION_NAME}] suppression shadow query failed`, msg);
+  }
+}
+
 function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>, answeredKeys: Set<string>): Record<string, unknown>[] {
   // Do not include `superseded`: those sends were actively closed because a co-recipient answered.
   const awaitingReplyStates = new Set(["sent", "delivered", "opened", "clicked", "reminded", "awaiting_clarify", "clarify_sent"]);
@@ -553,7 +605,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       appId
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=eq.${appId}&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc&limit=100`)
         : cpGet("cc_decision_email_sends?deleted_at=is.null&state=eq.awaiting_operator_review&select=id,app_id,issue_id,decision_external_ref,raw_decision_title,raw_decision_body,options_snapshot,recipient_id,recipient_name,recipient_email,replied_at,raw_reply_text,llm_extraction,clarification_attempt_count,state&order=updated_at.desc&limit=100"),
-      cpGet("cc_decision_email_sends?deleted_at=is.null&decision_answer_id=not.is.null&select=decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot"),
+      appIdFilter
+        ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&decision_answer_id=not.is.null&select=app_id,decision_external_ref,decision_answer_id,created_via,raw_decision_title,raw_decision_body,options_snapshot`)
+        : Promise.resolve([]),
       appIdFilter
         ? cpGet(`cc_decision_email_sends?deleted_at=is.null&app_id=in.(${appIdFilter})&state=in.(sent,delivered,opened,clicked,replied,extracting,awaiting_clarify,clarify_sent,awaiting_operator_review,answered,done,reminded)&select=id,issue_id,app_id,decision_external_ref,state,recipient_name,recipient_email,sent_at,reminded_at,updated_at,raw_decision_title,raw_decision_body,options_snapshot,risk_class&order=updated_at.desc`)
         : Promise.resolve([]),
@@ -671,6 +725,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const openIssueStatuses = new Set(["surfaced", "triaging", "gated"]);
   const nowTs = Date.now();
+  const candidateDecisionKeys = new Set<string>();
+  const liveSuppressedKeys = new Set<string>();
+  for (const decision of allDecisions) {
+    const rec = decision as Record<string, unknown>;
+    const key = decisionSuppressionKey(rec);
+    if (!key) continue;
+    candidateDecisionKeys.add(key);
+    if (answeredKeys.has(key) || routedKeys.has(key)) {
+      liveSuppressedKeys.add(key);
+      continue;
+    }
+    const issueStatus = asString(rec.cc_issue_status);
+    const issueScope = asString(rec.cc_issue_status_scope);
+    if (issueScope === "decision" && issueStatus && !openIssueStatuses.has(issueStatus)) {
+      liveSuppressedKeys.add(key);
+      continue;
+    }
+    const snoozedUntil = asString(rec.snoozed_until);
+    if (snoozedUntil) {
+      const ts = Date.parse(snoozedUntil);
+      if (!Number.isNaN(ts) && ts > nowTs) liveSuppressedKeys.add(key);
+    }
+  }
+  await auditSuppressionShadow(appId, apps, candidateDecisionKeys, liveSuppressedKeys);
+
   const filteredDecisions = allDecisions.filter((decision) => {
     const appIdValue = asString((decision as Record<string, unknown>).app_id);
     const refValue = asString((decision as Record<string, unknown>).id)

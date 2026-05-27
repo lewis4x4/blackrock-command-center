@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jsr:@panva/jose@^6";
+import { corsHeaders } from "../_shared/phase5.ts";
 
 // Browser read path for the Agents nav page. Federated: reads control-plane
 // queue/ledger tables only. No client data-plane calls and no runner daemon work.
@@ -27,11 +28,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
-};
 
 const OPEN_WORK_ORDER_STATUSES = ["queued", "gated", "claimed", "dispatched", "building", "pr_open"] as const;
 const CLOSED_WORK_ORDER_STATUSES = ["done", "failed", "dead_lettered", "cancelled"] as const;

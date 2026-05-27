@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
+import { corsHeaders } from "../_shared/phase5.ts";
 
 // Browser read path for Settings. Federated: reads control-plane config/observability only.
 // Secret values never cross this function boundary; only pointer names + presence booleans are returned.
@@ -27,11 +28,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
-};
 
 const INTEGRATION_STATUSES = ["live", "demo", "manual_safe", "planned"] as const;
 type IntegrationStatus = typeof INTEGRATION_STATUSES[number];

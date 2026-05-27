@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { aggregatorCorsHeaders as corsHeaders } from "../_shared/phase5.ts";
 
 const CP_URL = Deno.env.get("SUPABASE_URL")!;
 const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -10,11 +11,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, x-aggregator-token",
-};
 
 type ArtifactKind =
   | "doc"

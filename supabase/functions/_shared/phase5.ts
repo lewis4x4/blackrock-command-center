@@ -27,6 +27,21 @@ export const corsHeaders = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-csrf-token, x-cc-auto-route-toggle, x-cc-write-token",
 };
 
+export const aggregatorCorsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-aggregator-token",
+};
+
+const dataPlaneSecretCache = new Map<string, string | null>();
+
+export function getDataPlaneSecret(secretName: string): string | null {
+  if (dataPlaneSecretCache.has(secretName)) return dataPlaneSecretCache.get(secretName)!;
+  const value = Deno.env.get(secretName)?.trim() || null;
+  dataPlaneSecretCache.set(secretName, value);
+  return value;
+}
+
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type VerifyKey = CryptoKey | Uint8Array;

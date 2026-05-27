@@ -25,6 +25,7 @@
 // ============================================================================
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { aggregatorCorsHeaders as corsHeaders, getDataPlaneSecret } from "../_shared/phase5.ts";
 
 const CP_URL = Deno.env.get("SUPABASE_URL")!;
 const CP_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -36,11 +37,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, x-aggregator-token",
-};
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -104,7 +100,7 @@ function resolveDataPlaneKeys(dp: any): DataPlaneKey[] {
     { secretName: serviceSecretName, keyClass: "service_role" as const },
   ]) {
     if (!candidate.secretName) continue;
-    const key = Deno.env.get(candidate.secretName);
+    const key = getDataPlaneSecret(candidate.secretName);
     if (key) keys.push({ key, keyClass: candidate.keyClass, secretName: candidate.secretName });
   }
 
@@ -126,6 +122,20 @@ async function callSnapshot(dp: any, credential: DataPlaneKey): Promise<any> {
   });
   if (!r.ok) throw new Error(`cc_export_snapshot RPC (${credential.keyClass}) -> ${r.status} ${await r.text()}`);
   return r.json();
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex]);
+    }
+  }));
+  return results;
 }
 
 // Poll one app's cc_export_snapshot() contract via PostgREST RPC.
@@ -171,9 +181,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return json({ error: `registry read failed: ${msg}` }, 500);
   }
 
-  const results: any[] = [];
-
-  for (const app of apps) {
+  const results = await mapWithConcurrency(apps, 5, async (app) => {
     try {
       const { snapshot: snap, keyClass, secretName, fallbackFrom } = await pollApp(app);
 
@@ -219,15 +227,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }).catch(() => {/* audit best-effort */});
       }
 
-      results.push({
+      return {
         app: app.short_code,
         ok: true,
         build_status: snap.build_status ?? "unknown",
         issues: reconciled,
-      });
+      };
     } catch (e) {
       // Zero-blocking: log the failure, do NOT write a snapshot (keep last good),
-      // do NOT abort the loop.
+      // do NOT abort the run.
       const msg = e instanceof Error ? e.message : String(e);
       await cpInsert("cc_audit_events", {
         app_id: app.id,
@@ -235,9 +243,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
         event_type: "snapshot_failed",
         detail: { short_code: app.short_code, error: msg },
       }).catch(() => {/* audit best-effort */});
-      results.push({ app: app.short_code, ok: false, error: msg });
+      return { app: app.short_code, ok: false, error: msg };
     }
-  }
+  });
 
   const ok = results.filter((r) => r.ok).length;
   return json({ started_at: startedAt, polled: apps.length, ok, failed: apps.length - ok, results });

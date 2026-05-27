@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
-import { verifyWriteToken } from "../_shared/phase5.ts";
+import { corsHeaders, verifyWriteToken } from "../_shared/phase5.ts";
 
 // Browser write path for Apps edit basics. Auth mirrors cc-answer-issue:
 // Cloudflare Access JWT in production, or x-cc-read-token fallback in local/dev.
@@ -29,11 +29,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-cc-write-token",
-};
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BODY_KEYS = new Set(["app_id", "changes"]);

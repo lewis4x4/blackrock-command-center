@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK } from "jsr:@panva/jose@^6";
+import { corsHeaders } from "../_shared/phase5.ts";
 
 // Browser read path for cc_artifacts — the first §4.11 surface.
 // Browser requests must target an Access-protected hostname when CC_ACCESS_REQUIRED=true;
@@ -33,11 +34,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token",
-};
 
 type CursorToken = { last_indexed_at: string; id: string };
 

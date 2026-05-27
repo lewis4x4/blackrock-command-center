@@ -101,13 +101,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return json({ ok: true, telegram_message_id: telegram.result.message_id });
     }
 
+    const sanitizedTelegram = sanitizeTelegramResponse(telegram, token);
     await auditFailure(parsed.payload, "telegram_api_error", {
-      error_code: telegram.error_code ?? null,
-      description: telegram.description ?? "Telegram API returned ok=false",
+      error_code: sanitizedTelegram.error_code ?? null,
+      description: sanitizedTelegram.description ?? "Telegram API returned ok=false",
     });
-    return json({ ok: false, error: { code: "telegram_api_error", telegram } });
+    return json({ ok: false, error: { code: "telegram_api_error", telegram: sanitizedTelegram } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = sanitizeError(error instanceof Error ? error.message : String(error), [token]);
     await auditFailure(parsed.payload, "telegram_request_failed", { message });
     return json({ ok: false, error: { code: "telegram_request_failed", message } });
   }
@@ -212,6 +213,30 @@ function escapeMarkdownV2(value: string): string {
   return value.replace(/([_.*[\]()~`>#+\-=|{}!])/g, "\\$1");
 }
 
+function sanitizeError(value: string, extraSecrets: string[] = []): string {
+  let out = value.replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot***");
+  const knownSecrets = [
+    ...extraSecrets,
+    Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "",
+    Deno.env.get("TELEGRAM_OPERATOR_CHAT_ID") ?? "",
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+    Deno.env.get("CC_WRITE_TOKEN") ?? "",
+    Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "",
+  ];
+  for (const secret of knownSecrets) {
+    const normalized = secret.trim();
+    if (normalized.length >= 8) out = out.replaceAll(normalized, "***");
+  }
+  return out;
+}
+
+function sanitizeTelegramResponse(telegram: TelegramResponse, token: string): TelegramResponse {
+  return {
+    ...telegram,
+    description: telegram.description ? sanitizeError(telegram.description, [token]) : telegram.description,
+  };
+}
+
 async function postTelegram(token: string, chatId: string, text: string): Promise<TelegramResponse> {
   const response = await fetch(`${TELEGRAM_API_BASE}/bot${token}/sendMessage`, {
     method: "POST",
@@ -224,12 +249,12 @@ async function postTelegram(token: string, chatId: string, text: string): Promis
       disable_web_page_preview: true,
     }),
   });
-  const textBody = await response.text();
+  const textBody = sanitizeError(await response.text(), [token, chatId]);
   let telegram: TelegramResponse = {};
   if (textBody) {
     try {
       const parsed = JSON.parse(textBody) as unknown;
-      telegram = isRecord(parsed) ? parsed as TelegramResponse : { description: textBody };
+      telegram = isRecord(parsed) ? sanitizeTelegramResponse(parsed as TelegramResponse, token) : { description: textBody };
     } catch {
       telegram = { description: textBody };
     }

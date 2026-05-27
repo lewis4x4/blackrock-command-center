@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from "jsr:@panva/jose@^6";
-import { verifyWriteToken } from "../_shared/phase5.ts";
+import { corsHeaders, verifyWriteToken } from "../_shared/phase5.ts";
 
 // Browser write path for Apps registration. Auth mirrors cc-answer-issue and
 // writes through one atomic service-role-only cc_register_app RPC.
@@ -28,11 +28,6 @@ const cpHeaders = {
   "Content-Type": "application/json",
 };
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, Cf-Access-Jwt-Assertion, x-cc-read-token, x-cc-write-token",
-};
 
 const BODY_KEYS = new Set(["short_code", "display_name", "project_ref", "project_url", "service_secret_ref", "readonly_secret_ref", "github_repo"]);
 type VerifyKey = CryptoKey | Uint8Array;

@@ -33,6 +33,9 @@ Deno.serve(async (req) => {
   if (!approvedSubject || !approvedBody) return json({ error: "approved_subject and approved_body are required" }, 400, access.headerValue);
   if (approvedOptions.length === 0) return json({ error: "approved_options must include at least one option" }, 400, access.headerValue);
 
+  let claimedSendId: string | null = null;
+  let manualClaimToken: string | null = null;
+
   try {
     const sendRows = await cpGet(`cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=eq.rewrite_ready&select=*`);
     const existingSend = sendRows.find(isRecord);
@@ -56,6 +59,17 @@ Deno.serve(async (req) => {
       baseSend = takeover[0];
     }
 
+    manualClaimToken = crypto.randomUUID();
+    const claimedRows = await cpPatch<Record<string, unknown>>(
+      `cc_decision_email_sends?id=eq.${sendId}&deleted_at=is.null&state=eq.rewrite_ready&claim_token=is.null`,
+      { claim_token: manualClaimToken },
+    );
+    if (claimedRows.length !== 1) {
+      return json({ error: "decision route is already being finalized" }, 409, access.headerValue);
+    }
+    claimedSendId = sendId;
+    baseSend = claimedRows[0];
+
     const appId = cleanString(baseSend.app_id, 80)!;
     const issueId = cleanString(baseSend.issue_id, 80)!;
     const decisionExternalRef = cleanString(baseSend.decision_external_ref, 200)!;
@@ -63,6 +77,28 @@ Deno.serve(async (req) => {
     const recipientRows = await cpGet(`registry_app_decision_recipients?app_id=eq.${appId}&id=in.(${recipientIds.join(",")})&active=eq.true&deleted_at=is.null&select=*`);
     const recipients = recipientRows.filter(isRecord);
     if (recipients.length !== recipientIds.length) return json({ error: "one or more recipients are inactive, deleted, or not bound to this app" }, 400, access.headerValue);
+
+    const duplicates = await recentDuplicateSends(appId, decisionExternalRef, recipients);
+    if (duplicates.length > 0) {
+      await cpAudit(appId, access.actor, "decision_route_duplicate_rejected", {
+        issue_id: issueId,
+        decision_external_ref: decisionExternalRef,
+        duplicate_window_seconds: 60,
+        duplicates,
+      }).catch(() => {/* audit best-effort */});
+      if (claimedSendId && manualClaimToken) {
+        await cpPatch<Record<string, unknown>>(
+          `cc_decision_email_sends?id=eq.${claimedSendId}&state=eq.rewrite_ready&claim_token=eq.${manualClaimToken}`,
+          { claim_token: null },
+        ).catch(() => {/* release best-effort */});
+      }
+      return json({
+        error: "duplicate decision route rejected",
+        message: "This decision was already routed to one or more selected recipients within the last 60 seconds. Wait a minute before retrying.",
+        duplicate_window_seconds: 60,
+        duplicates,
+      }, 409, access.headerValue);
+    }
 
     const storedOptions = approvedOptions.map((option) => ({ id: option.id, label: option.label }));
     const prepared: Array<{
@@ -118,6 +154,7 @@ Deno.serve(async (req) => {
         gmail_thread_id: gmail.threadId ?? gmail.id,
         state: "sent",
         sent_at: new Date().toISOString(),
+        claim_token: null,
       });
       const updated = updatedRows[0];
       sent.push(updated);
@@ -142,6 +179,12 @@ Deno.serve(async (req) => {
     }
     return json({ sent }, 200, access.headerValue);
   } catch (e) {
+    if (claimedSendId && manualClaimToken) {
+      await cpPatch<Record<string, unknown>>(
+        `cc_decision_email_sends?id=eq.${claimedSendId}&state=eq.rewrite_ready&claim_token=eq.${manualClaimToken}`,
+        { claim_token: null },
+      ).catch(() => {/* release best-effort */});
+    }
     const msg = e instanceof Error ? e.message : String(e);
     return json({ error: "decision route failed", detail: msg }, 500, access.headerValue);
   }
@@ -221,6 +264,27 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `--${boundary}--`,
     "",
   ].join("\r\n");
+}
+
+type RecentDuplicateSend = { recipient_id: string | null; recipient_email: string; send_id: string; sent_at: string | null };
+
+async function recentDuplicateSends(appId: string, decisionExternalRef: string, recipients: Record<string, unknown>[]): Promise<RecentDuplicateSend[]> {
+  const sentAfter = new Date(Date.now() - 60_000).toISOString();
+  const checks = recipients.map(async (recipient): Promise<RecentDuplicateSend | null> => {
+    const recipientId = cleanString(recipient.id, 80);
+    const recipientEmail = cleanString(recipient.contact_email, 320);
+    if (!recipientEmail) return null;
+    const rows = await cpGet(`cc_decision_email_sends?app_id=eq.${appId}&decision_external_ref=eq.${encodeURIComponent(decisionExternalRef)}&recipient_email=eq.${encodeURIComponent(recipientEmail)}&sent_at=gte.${encodeURIComponent(sentAfter)}&deleted_at=is.null&select=id,recipient_email,sent_at&order=sent_at.desc&limit=1`);
+    const duplicate = rows.find(isRecord);
+    if (!duplicate) return null;
+    return {
+      recipient_id: recipientId,
+      recipient_email: recipientEmail,
+      send_id: cleanString(duplicate.id, 80) ?? "",
+      sent_at: cleanString(duplicate.sent_at, 80),
+    };
+  });
+  return (await Promise.all(checks)).filter((item): item is RecentDuplicateSend => !!item && !!item.send_id);
 }
 
 async function siblingAwarenessLine(appId: string, decisionExternalRef: string, currentSendId: string): Promise<string | null> {
