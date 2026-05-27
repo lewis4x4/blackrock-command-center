@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, cleanString, cpAudit, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, isRecord, json, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, cleanString, cpAudit, cpGet, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, isRecord, json, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-decision-reminder";
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
@@ -34,6 +34,7 @@ Deno.serve(async (req) => {
     const sendId = cleanString(row.id, 80)!;
     const appId = cleanString(row.app_id, 80);
     const issueId = cleanString(row.issue_id, 80);
+    const decisionExternalRef = cleanString(row.decision_external_ref, 200) ?? "";
     const claimToken = cleanString(row.claim_token, 80);
     const recipientEmail = cleanString(row.recipient_email, 320);
     const recipientName = cleanString(row.recipient_name, 160) ?? recipientEmail ?? "there";
@@ -52,12 +53,13 @@ Deno.serve(async (req) => {
     const gmailMessageId = `<cc-reminder-${reminderAttemptId}@blackrockai.co>`;
 
     try {
+      const awarenessLine = await siblingAwarenessLine(appId ?? "", decisionExternalRef, sendId);
       const raw = composeMessage({
         sendId,
         toName: recipientName,
         toEmail: recipientEmail,
         subject,
-        body,
+        body: appendSiblingAwareness(body, awarenessLine),
         inReplyTo: originalMessageId,
         references: originalMessageId,
         messageId: gmailMessageId,
@@ -125,6 +127,33 @@ async function releaseClaim(sendId: string, claimToken: string | null): Promise<
       reminder_attempt_id: null,
     },
   );
+}
+
+async function siblingAwarenessLine(appId: string, decisionExternalRef: string, currentSendId: string): Promise<string | null> {
+  if (!appId || !decisionExternalRef) return null;
+  const rows = await cpGet(`cc_decision_email_sends?app_id=eq.${appId}&decision_external_ref=eq.${encodeURIComponent(decisionExternalRef)}&id=neq.${currentSendId}&deleted_at=is.null&select=recipient_name,recipient_email`);
+  const names = rows.filter(isRecord).map(recipientDisplayName).filter((v): v is string => !!v);
+  if (names.length === 0) return null;
+  return `Also sent to ${formatNameList(names)}.`;
+}
+
+function appendSiblingAwareness(body: string, line: string | null): string {
+  return line ? `${body}\n\n${line}` : body;
+}
+
+function recipientDisplayName(row: Record<string, unknown>): string | null {
+  return cleanString(row.recipient_name, 160) ?? localPart(cleanString(row.recipient_email, 320));
+}
+
+function localPart(email: string | null): string | null {
+  if (!email) return null;
+  return email.split("@")[0] || null;
+}
+
+function formatNameList(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 function composeMessage(input: { sendId: string; toName: string; toEmail: string; subject: string; body: string; inReplyTo: string; references: string; messageId: string }): string {

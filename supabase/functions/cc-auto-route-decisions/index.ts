@@ -143,9 +143,18 @@ Deno.serve(async (req) => {
 
       const subject = cleanString(send.rewritten_subject, 300) ?? cleanString(send.raw_decision_title, 300) ?? "Quick question";
       const body = cleanString(send.rewritten_body, 8000) ?? cleanString(send.raw_decision_body, 8000) ?? "Quick question before we proceed.";
+      const decisionExternalRef = cleanString(send.decision_external_ref, 200) ?? "";
       const options = normalizeOptions(send.options_snapshot);
       if (options.length === 0) throw new Error("send has no options_snapshot");
 
+      const prepared: Array<{
+        perSendId: string;
+        recipientId: string;
+        recipientEmail: string;
+        recipientName: string;
+        tokenized: Tokenized;
+        messageId: string;
+      }> = [];
       for (let i = 0; i < recipients.length; i += 1) {
         const recipient = recipients[i];
         const recipientId = cleanString(recipient.id, 80)!;
@@ -178,23 +187,35 @@ Deno.serve(async (req) => {
           await cpAudit(appId, access.actor, "decision_auto_route_finalize_stale", { send_id: perSendId, issue_id: issueId });
           throw new Error("finalize claim became stale");
         }
+        prepared.push({ perSendId, recipientId, recipientEmail, recipientName, tokenized, messageId });
+      }
 
-        const raw = composeMessage({ sendId: perSendId, toName: recipientName, toEmail: recipientEmail, subject, body, options: tokenized.options, messageId });
+      for (const item of prepared) {
+        const awarenessLine = await siblingAwarenessLine(appId, decisionExternalRef, item.perSendId);
+        const raw = composeMessage({
+          sendId: item.perSendId,
+          toName: item.recipientName,
+          toEmail: item.recipientEmail,
+          subject,
+          body: appendSiblingAwareness(body, awarenessLine),
+          options: item.tokenized.options,
+          messageId: item.messageId,
+        });
         const gmail = await gmailSend(raw);
 
-        const postPatchPath = perSendId === sendId
-          ? `cc_decision_email_sends?id=eq.${perSendId}&claim_token=eq.${claimToken}`
-          : `cc_decision_email_sends?id=eq.${perSendId}`;
+        const postPatchPath = item.perSendId === sendId
+          ? `cc_decision_email_sends?id=eq.${item.perSendId}&claim_token=eq.${claimToken}`
+          : `cc_decision_email_sends?id=eq.${item.perSendId}`;
         const postPatched = await cpPatch<Record<string, unknown>>(postPatchPath, {
           gmail_thread_id: gmail.threadId ?? gmail.id,
           state: "sent",
           sent_at: new Date().toISOString(),
         });
-        if (perSendId === sendId && postPatched.length !== 1) {
+        if (item.perSendId === sendId && postPatched.length !== 1) {
           await cpAudit(appId, access.actor, "decision_auto_route_post_send_drift", {
-            send_id: perSendId,
+            send_id: item.perSendId,
             issue_id: issueId,
-            recipient_id: recipientId,
+            recipient_id: item.recipientId,
             gmail_id: gmail.id,
           });
           await cpPatch(
@@ -205,11 +226,11 @@ Deno.serve(async (req) => {
         }
 
         await cpAudit(appId, access.actor, "decision_auto_route_sent", {
-          send_id: perSendId,
+          send_id: item.perSendId,
           issue_id: issueId,
-          recipient_id: recipientId,
-          owner_name: recipientName,
-          owner_email: recipientEmail,
+          recipient_id: item.recipientId,
+          owner_name: item.recipientName,
+          owner_email: item.recipientEmail,
           gmail_id: gmail.id,
           gmail_thread_id: gmail.threadId ?? null,
         });
@@ -326,6 +347,33 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `--${boundary}--`,
     "",
   ].join("\r\n");
+}
+
+async function siblingAwarenessLine(appId: string, decisionExternalRef: string, currentSendId: string): Promise<string | null> {
+  if (!decisionExternalRef) return null;
+  const rows = await cpGet(`cc_decision_email_sends?app_id=eq.${appId}&decision_external_ref=eq.${encodeURIComponent(decisionExternalRef)}&id=neq.${currentSendId}&deleted_at=is.null&select=recipient_name,recipient_email`);
+  const names = rows.filter(isRecord).map(recipientDisplayName).filter((v): v is string => !!v);
+  if (names.length === 0) return null;
+  return `Also sent to ${formatNameList(names)}.`;
+}
+
+function appendSiblingAwareness(body: string, line: string | null): string {
+  return line ? `${body}\n\n${line}` : body;
+}
+
+function recipientDisplayName(row: Record<string, unknown>): string | null {
+  return cleanString(row.recipient_name, 160) ?? localPart(cleanString(row.recipient_email, 320));
+}
+
+function localPart(email: string | null): string | null {
+  if (!email) return null;
+  return email.split("@")[0] || null;
+}
+
+function formatNameList(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 function quoteName(name: string): string {

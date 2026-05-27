@@ -58,12 +58,21 @@ Deno.serve(async (req) => {
 
     const appId = cleanString(baseSend.app_id, 80)!;
     const issueId = cleanString(baseSend.issue_id, 80)!;
+    const decisionExternalRef = cleanString(baseSend.decision_external_ref, 200)!;
 
     const recipientRows = await cpGet(`registry_app_decision_recipients?app_id=eq.${appId}&id=in.(${recipientIds.join(",")})&active=eq.true&deleted_at=is.null&select=*`);
     const recipients = recipientRows.filter(isRecord);
     if (recipients.length !== recipientIds.length) return json({ error: "one or more recipients are inactive, deleted, or not bound to this app" }, 400, access.headerValue);
 
-    const sent: Record<string, unknown>[] = [];
+    const storedOptions = approvedOptions.map((option) => ({ id: option.id, label: option.label }));
+    const prepared: Array<{
+      perSendId: string;
+      recipientId: string;
+      recipientEmail: string;
+      recipientName: string;
+      tokenized: Tokenized;
+      messageId: string;
+    }> = [];
     for (let i = 0; i < recipients.length; i += 1) {
       const recipient = recipients[i];
       const recipientId = cleanString(recipient.id, 80)!;
@@ -71,26 +80,9 @@ Deno.serve(async (req) => {
       const recipientName = cleanString(recipient.contact_name, 160) ?? recipientEmail;
       const perSend = i === 0 ? baseSend : await cloneSend(baseSend);
       const perSendId = cleanString(perSend.id, 80)!;
-      if (i > 0) {
-        await cpPatch(
-          `cc_decision_email_sends?id=eq.${perSendId}&state=eq.rewrite_ready`,
-          { state: 'sent', sent_at: new Date().toISOString() },
-        );
-      }
-      const storedOptions = approvedOptions.map((option) => ({ id: option.id, label: option.label }));
       const tokenized = await tokenizedOptions(storedOptions, perSendId);
       const messageId = `<cc-${perSendId}@blackrockai.co>`;
-      const raw = composeMessage({
-        sendId: perSendId,
-        toName: recipientName,
-        toEmail: recipientEmail,
-        subject: approvedSubject,
-        body: approvedBody,
-        options: tokenized.options,
-        messageId,
-      });
-      const gmail = await gmailSend(raw);
-      const updatedRows = await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${perSendId}`, {
+      await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${perSendId}`, {
         recipient_id: recipientId,
         recipient_email: recipientEmail,
         recipient_name: recipientName,
@@ -103,20 +95,38 @@ Deno.serve(async (req) => {
         magic_link_token_hash: tokenized.firstHash,
         magic_link_expires_at: tokenized.expiresAt,
         gmail_message_id: messageId,
+        last_error: null,
+        created_via: "manual",
+      });
+      prepared.push({ perSendId, recipientId, recipientEmail, recipientName, tokenized, messageId });
+    }
+
+    const sent: Record<string, unknown>[] = [];
+    for (const item of prepared) {
+      const awarenessLine = await siblingAwarenessLine(appId, decisionExternalRef, item.perSendId);
+      const raw = composeMessage({
+        sendId: item.perSendId,
+        toName: item.recipientName,
+        toEmail: item.recipientEmail,
+        subject: approvedSubject,
+        body: appendSiblingAwareness(approvedBody, awarenessLine),
+        options: item.tokenized.options,
+        messageId: item.messageId,
+      });
+      const gmail = await gmailSend(raw);
+      const updatedRows = await cpPatch<Record<string, unknown>>(`cc_decision_email_sends?id=eq.${item.perSendId}`, {
         gmail_thread_id: gmail.threadId ?? gmail.id,
         state: "sent",
         sent_at: new Date().toISOString(),
-        last_error: null,
-        created_via: "manual",
       });
       const updated = updatedRows[0];
       sent.push(updated);
       await cpAudit(appId, access.actor, "decision_routed", {
-        send_id: perSendId,
+        send_id: item.perSendId,
         issue_id: issueId,
-        recipient_id: recipientId,
-        owner_name: recipientName,
-        owner_email: recipientEmail,
+        recipient_id: item.recipientId,
+        owner_name: item.recipientName,
+        owner_email: item.recipientEmail,
         gmail_id: gmail.id,
         gmail_thread_id: gmail.threadId ?? null,
       });
@@ -211,6 +221,32 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
     `--${boundary}--`,
     "",
   ].join("\r\n");
+}
+
+async function siblingAwarenessLine(appId: string, decisionExternalRef: string, currentSendId: string): Promise<string | null> {
+  const rows = await cpGet(`cc_decision_email_sends?app_id=eq.${appId}&decision_external_ref=eq.${encodeURIComponent(decisionExternalRef)}&id=neq.${currentSendId}&deleted_at=is.null&select=recipient_name,recipient_email`);
+  const names = rows.filter(isRecord).map(recipientDisplayName).filter((v): v is string => !!v);
+  if (names.length === 0) return null;
+  return `Also sent to ${formatNameList(names)}.`;
+}
+
+function appendSiblingAwareness(body: string, line: string | null): string {
+  return line ? `${body}\n\n${line}` : body;
+}
+
+function recipientDisplayName(row: Record<string, unknown>): string | null {
+  return cleanString(row.recipient_name, 160) ?? localPart(cleanString(row.recipient_email, 320));
+}
+
+function localPart(email: string | null): string | null {
+  if (!email) return null;
+  return email.split("@")[0] || null;
+}
+
+function formatNameList(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 function normalizeOption(item: unknown): Option | null {
