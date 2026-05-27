@@ -2549,6 +2549,14 @@ export async function deleteDecisionRecipient(recipientId: string, demo = false)
   await postJson('cc-delete-recipient', { recipient_id: recipientId });
 }
 
+export interface DecisionConfirmAnswer {
+  answered_by_name: string | null;
+  answer_value: string | null;
+  answer_label: string | null;
+  answered_at: string | null;
+  rationale: string | null;
+}
+
 export interface DecisionConfirmData extends Record<string, unknown> {
   send_id: string;
   selected_option_id: string;
@@ -2560,6 +2568,8 @@ export interface DecisionConfirmData extends Record<string, unknown> {
   options: DecisionOptionLike[];
   selected_option: DecisionOptionLike | null;
   expires_at: string;
+  state?: string;
+  answer: DecisionConfirmAnswer | null;
 }
 
 export async function loadDecisionConfirmData(token: string, sendId: string, optionId: string): Promise<DecisionConfirmData> {
@@ -2577,11 +2587,30 @@ export async function loadDecisionConfirmData(token: string, sendId: string, opt
     options: Array.isArray(rec.options) ? rec.options.map(optionFromUnknown).filter((v): v is DecisionOptionLike => !!v) : [],
     selected_option: optionFromUnknown(rec.selected_option),
     expires_at: asString(rec.expires_at) ?? '',
+    state: asString(rec.state) ?? undefined,
+    answer: decisionConfirmAnswerFromUnknown(rec.answer),
   };
 }
 
 export async function submitDecisionConfirm(token: string, sendId: string, optionId: string, csrf: string): Promise<unknown> {
   return publicPostJson('cc-decision-confirm-submit', { token, send_id: sendId, option_id: optionId, csrf });
+}
+
+function decisionConfirmAnswerFromUnknown(value: unknown): DecisionConfirmAnswer | null {
+  const rec = asRecord(value);
+  const answerValue = asString(rec.answer_value);
+  const answerLabel = asString(rec.answer_label);
+  const answeredByName = asString(rec.answered_by_name);
+  const answeredAt = asString(rec.answered_at);
+  const rationale = asString(rec.rationale);
+  if (!answerValue && !answerLabel && !answeredByName && !answeredAt && !rationale) return null;
+  return {
+    answered_by_name: answeredByName,
+    answer_value: answerValue,
+    answer_label: answerLabel,
+    answered_at: answeredAt,
+    rationale,
+  };
 }
 
 function optionFromUnknown(value: unknown): DecisionOptionLike | null {

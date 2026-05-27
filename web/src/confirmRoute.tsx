@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { loadDecisionConfirmData, submitDecisionConfirm, type DecisionConfirmData } from './lib';
+import { ago, loadDecisionConfirmData, submitDecisionConfirm, type DecisionConfirmData } from './lib';
 
 export function confirmRouteFromLocation(): { token: string; sendId: string; optionId: string } | null {
   const match = window.location.pathname.match(/^\/c\/([^/]+)$/);
@@ -22,8 +22,12 @@ export function DecisionConfirmPage({ token, sendId, optionId }: { token: string
       .catch((e) => { setError(e instanceof Error ? e.message : String(e)); setState('error'); });
   }, [token, sendId, optionId]);
 
+  const alreadyAnswered = data?.state === 'already_answered';
+  const answer = alreadyAnswered ? data.answer : null;
+  const cockpitUrl = `${window.location.origin}/`;
+
   async function confirm() {
-    if (!data) return;
+    if (!data || alreadyAnswered) return;
     setState('submitting');
     setError('');
     try {
@@ -50,15 +54,44 @@ export function DecisionConfirmPage({ token, sendId, optionId }: { token: string
               <b>{data.subject ?? 'Decision question'}</b>
               {data.body && <p>{data.body}</p>}
             </div>
-            <div className="confirm-choice">
-              <span>Your selected answer</span>
-              <b>{data.selected_option?.label ?? data.selected_option_id}</b>
-            </div>
-            <button className="btn-primary" onClick={() => void confirm()} disabled={state === 'submitting'}>{state === 'submitting' ? 'Confirming…' : 'Confirm answer'}</button>
-            <p className="confirm-small">No answer is recorded until you press Confirm.</p>
+            {alreadyAnswered ? (
+              <AlreadyAnsweredBlock answer={answer} />
+            ) : (
+              <>
+                <div className="confirm-choice">
+                  <span>Your selected answer</span>
+                  <b>{data.selected_option?.label ?? data.selected_option_id}</b>
+                </div>
+                <button className="btn-primary" onClick={() => void confirm()} disabled={state === 'submitting'}>{state === 'submitting' ? 'Confirming…' : 'Confirm answer'}</button>
+                <p className="confirm-small">No answer is recorded until you press Confirm.</p>
+              </>
+            )}
+            {alreadyAnswered && <a className="confirm-cockpit-link" href={cockpitUrl}>View all decisions in the cockpit →</a>}
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function AlreadyAnsweredBlock({ answer }: { answer: DecisionConfirmData['answer'] }) {
+  if (!answer) {
+    return <div className="panel-confirm queued">This decision has already been answered. No new answer is needed.</div>;
+  }
+  const who = answer.answered_by_name ?? 'Someone';
+  const picked = answer.answer_label ?? answer.answer_value ?? 'an answer';
+  const when = ago(answer.answered_at) ?? 'recently';
+  return (
+    <div className="confirm-answer-summary">
+      <div className="confirm-answer-kicker">Already answered</div>
+      <p><b>{who}</b> answered this {when} — picked <b>“{picked}”</b>.</p>
+      {answer.rationale && (
+        <div className="confirm-rationale">
+          <span>Rationale</span>
+          <p>{answer.rationale}</p>
+        </div>
+      )}
+      <p className="confirm-small">This link is now read-only so the recorded answer stays unchanged.</p>
     </div>
   );
 }
