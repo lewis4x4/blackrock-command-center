@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  ago, colorFor, HEALTH, loadAppCockpitDetail, sum,
+  ago, appToneClass, HEALTH, loadAppCockpitDetail, sum,
   type ActivityEvent, type AppDetailPayload, type AppRow, type BuildStatus,
 } from './lib';
 
@@ -79,7 +79,7 @@ function HealthHeader({ app, detail, state, onRefresh }: { app: AppRow; detail: 
   return (
     <section className="detail-hero">
       <div className="detail-hero-main">
-        <div className="badge detail-badge" style={{ background: colorFor(app.short_code) }}>{app.short_code[0]}</div>
+        <div className={'badge detail-badge app-badge ' + appToneClass(app.short_code)}>{app.short_code[0]}</div>
         <div>
           <div className="detail-eyebrow">{app.short_code} cockpit</div>
           <h1>{app.display_name}</h1>

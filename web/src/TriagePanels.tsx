@@ -89,6 +89,37 @@ export function useDecisionAnswerFlow({ rows, demo, issueIdForRow }: {
   };
 }
 
+export function PortfolioBlockersPanel({ apps, onClose }: { apps: AppRow[]; onClose: () => void }) {
+  const blockedApps = apps
+    .filter((app) => (app.roadmap_counts?.blocked ?? 0) > 0)
+    .sort((a, b) => (b.roadmap_counts?.blocked ?? 0) - (a.roadmap_counts?.blocked ?? 0) || b.criticality - a.criticality);
+
+  return (
+    <SlideOver open title="Portfolio blockers" subtitle="Apps with blocked roadmap work across the command center" onClose={onClose} footer={(
+      <button className="ghost-btn" onClick={onClose}>Close</button>
+    )}>
+      <PanelStatus state="ready" error="" empty={blockedApps.length === 0} emptyCopy="No blocked roadmap work is currently reported." />
+      {blockedApps.length > 0 && (
+        <div className="panel-section">
+          <div className="panel-label">Blocked apps</div>
+          <div className="panel-stack">
+            {blockedApps.map((app) => {
+              const count = app.roadmap_counts?.blocked ?? 0;
+              return (
+                <button className="panel-card" key={app.id} onClick={() => { window.location.hash = `#/apps/${app.short_code.toLowerCase()}`; }}>
+                  <b>{app.display_name}</b>
+                  <span>{app.short_code} · {count} blocked item{count === 1 ? '' : 's'} · {app.lifecycle_phase}</span>
+                  <em>Open cockpit</em>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </SlideOver>
+  );
+}
+
 export function OpenDecisionsPanel(props: PanelProps) {
   const { issue, app, onClose, onResolved, demo = false } = props;
   const { state, rows, error } = usePanelSection(app.id, demo, 'decisions');

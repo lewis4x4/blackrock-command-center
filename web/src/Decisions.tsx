@@ -4,7 +4,7 @@ import { DecisionRouteModal } from './DecisionRouteModal';
 import { ExtractionReviewModal } from './ExtractionReviewModal';
 import { DecisionAnswerBody, useDecisionAnswerFlow } from './TriagePanels';
 import {
-  ago, colorFor, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, resolveLateReply, setDecisionPause, setDecisionSnooze,
+  ago, appToneClass, assertNever, confirmExtraction, decisionAgeDays, decisionRowId, decisionRowIssueId, decisionRowOwnerKind, decisionRowTitle, loadDecisions, operatorClarifyExtraction, rejectExtraction, resolveLateReply, setDecisionPause, setDecisionSnooze,
   type AnsweredDecisionSummary, type DecisionAgeFilter, type DecisionOwnerFilter, type DecisionRow, type DecisionsAppStatus, type LateReplyIssueSummary,
   type DecisionsFilters, type DecisionsPayload, type DecisionSort, type DecisionStateFilter, type OperatorClarifyExtractionPayload, type PendingReviewSend, type RoutedDecisionSummary,
 } from './lib';
@@ -14,7 +14,19 @@ export type DecisionsViewHandle = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
+type DecisionEmailState = 'unrouted' | 'routed' | 'link_clicked' | 'awaiting_operator_confirm' | 'answered' | 'expired' | 'paused' | 'snoozed';
 type RouteModalTarget = { appId: string; issueId: string | null; decision: Record<string, unknown> };
+
+const DECISION_EMAIL_STATES = new Set<DecisionEmailState>([
+  'unrouted',
+  'routed',
+  'link_clicked',
+  'awaiting_operator_confirm',
+  'answered',
+  'expired',
+  'paused',
+  'snoozed',
+]);
 
 const emptyDecisions: DecisionsPayload = {
   apps_reached: [],
@@ -288,7 +300,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
     <button className={'decision-card ' + owner} onClick={() => onOpen(decision)}>
       <div className="decision-card-top">
         <div className="agents-app">
-          <span className="badge" style={{ background: colorFor(decision.app_short_code) }}>{decision.app_short_code[0]}</span>
+          <span className={'badge app-badge ' + appToneClass(decision.app_short_code)}>{decision.app_short_code[0]}</span>
           <div>
             <b>{decision.app_display_name}</b>
             <span>{decision.app_short_code}</span>
@@ -303,7 +315,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         {text(decision.reminded_at) && <span>reminded {ago(text(decision.reminded_at)) ?? 'recently'}</span>}
       </div>
       <div className="decision-options">{decisionOptionsCopy(owner, emailState, options, decision)}</div>
-      <span className="btn-primary decision-route" aria-hidden="true" style={{ width: '100%', minHeight: 44 }}>{decisionCta(emailState)}</span>
+      <span className="btn-primary decision-route" aria-hidden="true">{decisionCta(emailState)}</span>
     </button>
   );
 }
@@ -335,7 +347,7 @@ function RoutedBand({ rows, loading, onOpen }: { rows: RoutedDecisionSummary[]; 
           {rows.map((row) => (
             <div className="answered-row" key={row.send_id}>
               <div className="agents-app">
-                <span className="badge" style={{ background: colorFor(row.app_short_code ?? 'APP') }}>{(row.app_short_code ?? 'A')[0]}</span>
+                <span className={'badge app-badge ' + appToneClass(row.app_short_code ?? 'APP')}>{(row.app_short_code ?? 'A')[0]}</span>
                 <div>
                   <b>{row.app_display_name ?? row.app_short_code ?? 'App'}</b>
                   <span>{row.app_short_code ?? '—'}</span>
@@ -346,8 +358,8 @@ function RoutedBand({ rows, loading, onOpen }: { rows: RoutedDecisionSummary[]; 
                 <span>{routedStateLabel(row.state)}{row.recipient_count > 1 ? ` · ${row.recipient_count} recipients` : row.recipient_name ? ` · ${row.recipient_name}` : ''}</span>
               </div>
               <div className="answered-age">{ago(row.reminded_at ?? row.sent_at ?? row.updated_at) ?? '—'}</div>
-              <div className="agents-hero-actions" style={{ justifyContent: 'flex-end' }}>
-                <button className="btn-primary" style={{ minHeight: 44 }} type="button" onClick={() => onOpen(row)}>Resend</button>
+              <div className="agents-hero-actions answered-actions">
+                <button className="btn-primary answered-action-primary" type="button" onClick={() => onOpen(row)}>Resend</button>
               </div>
             </div>
           ))}
@@ -405,7 +417,7 @@ function LateRepliesBand({ rows, loading, demo, onResolved }: { rows: LateReplyI
             return (
               <div className="answered-row" key={row.issue_id}>
                 <div className="agents-app">
-                  <span className="badge" style={{ background: colorFor(row.app_short_code ?? 'APP') }}>{(row.app_short_code ?? 'A')[0]}</span>
+                  <span className={'badge app-badge ' + appToneClass(row.app_short_code ?? 'APP')}>{(row.app_short_code ?? 'A')[0]}</span>
                   <div>
                     <b>{row.app_display_name ?? row.app_short_code ?? 'App'}</b>
                     <span>{row.app_short_code ?? '—'}</span>
@@ -416,7 +428,7 @@ function LateRepliesBand({ rows, loading, demo, onResolved }: { rows: LateReplyI
                   <span>{sender} · {row.reply_excerpt ? `“${row.reply_excerpt}”` : 'No reply excerpt captured.'}</span>
                 </div>
                 <div className="answered-age">{ago(row.last_seen_at ?? row.created_at ?? row.surfaced_at) ?? '—'}</div>
-                <div className="agents-hero-actions" style={{ justifyContent: 'flex-end' }}>
+                <div className="agents-hero-actions answered-actions">
                   <button className="btn-primary" disabled={busy} onClick={() => void resolve(row, 'apply')}>{busy ? 'Saving…' : 'Apply as answer'}</button>
                   <button className="ghost-btn" disabled={busy} onClick={() => void resolve(row, 'dismiss')}>Dismiss as noise</button>
                 </div>
@@ -450,7 +462,7 @@ function AnsweredBand({ rows, loading }: { rows: AnsweredDecisionSummary[]; load
           {rows.map((row) => (
             <div className="answered-row" key={row.id}>
               <div className="agents-app">
-                <span className="badge" style={{ background: colorFor(row.app_short_code ?? 'APP') }}>{(row.app_short_code ?? 'A')[0]}</span>
+                <span className={'badge app-badge ' + appToneClass(row.app_short_code ?? 'APP')}>{(row.app_short_code ?? 'A')[0]}</span>
                 <div>
                   <b>{row.app_display_name ?? row.app_short_code ?? 'App'}</b>
                   <span>{row.app_short_code ?? '—'}</span>
@@ -545,7 +557,7 @@ function Metric({ label, value, tone = '' }: { label: string; value: string; ton
 function SkeletonCards() {
   return (
     <div className="agents-skeleton">
-      {Array.from({ length: 3 }).map((_, i) => <div className="skel" key={i} style={{ height: 92 }} />)}
+      {Array.from({ length: 3 }).map((_, i) => <div className="skel skel-decision-card" key={i} />)}
     </div>
   );
 }
@@ -586,19 +598,39 @@ function decisionOptions(row: Record<string, unknown>): { id: string; label: str
   }).filter((item): item is { id: string; label: string } => !!item);
 }
 
-function decisionEmailState(row: Record<string, unknown>): string | null {
+function decisionEmailState(row: Record<string, unknown>): DecisionEmailState | null {
   if (row.auto_route_paused === true || text(row.auto_route_paused_at)) return 'paused';
   const snoozedUntil = text(row.snoozed_until);
   if (snoozedUntil && new Date(snoozedUntil).getTime() > Date.now()) return 'snoozed';
   const direct = text(row.decision_email_state) ?? text(row.email_state) ?? text(row.routing_state);
   const status = text(row.status)?.toLowerCase();
-  const raw = (direct ?? (status === 'routed_to_client' ? 'routed' : status === 'answered' ? 'answered' : null))?.toLowerCase();
+  const raw = (direct ?? (status === 'routed_to_client' ? 'routed' : status === 'answered' || status === 'done' ? 'answered' : null))?.toLowerCase();
   if (!raw) return 'unrouted';
-  if (['unrouted', 'routed', 'link_clicked', 'awaiting_operator_confirm', 'answered', 'expired'].includes(raw)) return raw;
-  if (raw === 'clicked') return 'link_clicked';
-  if (raw === 'replied' || raw === 'extracting') return 'awaiting_operator_confirm';
-  if (raw === 'sent' || raw === 'delivered' || raw === 'opened') return 'routed';
-  return null;
+  if (isDecisionEmailState(raw)) return raw;
+  switch (raw) {
+    case 'clicked':
+      return 'link_clicked';
+    case 'replied':
+    case 'extracting':
+    case 'awaiting_operator_review':
+      return 'awaiting_operator_confirm';
+    case 'sent':
+    case 'delivered':
+    case 'opened':
+    case 'reminded':
+    case 'awaiting_clarify':
+    case 'clarify_sent':
+    case 'rewrite_ready':
+      return 'routed';
+    case 'done':
+      return 'answered';
+    default:
+      return null;
+  }
+}
+
+function isDecisionEmailState(value: string): value is DecisionEmailState {
+  return (DECISION_EMAIL_STATES as ReadonlySet<string>).has(value);
 }
 
 function ownerLabel(owner: 'operator' | 'client' | 'unknown'): string {
@@ -622,40 +654,88 @@ function ageTone(row: Record<string, unknown>): 'auto' | 'authorize' | 'destruct
   return 'destructive';
 }
 
-function stateBadgeTone(state: string): string {
-  if (state === 'unrouted') return 'awaiting_operator_confirm';
-  return state;
+function stateBadgeTone(state: DecisionEmailState): DecisionEmailState {
+  switch (state) {
+    case 'unrouted':
+      return 'awaiting_operator_confirm';
+    case 'routed':
+    case 'link_clicked':
+    case 'awaiting_operator_confirm':
+    case 'answered':
+    case 'expired':
+    case 'paused':
+    case 'snoozed':
+      return state;
+    default:
+      return assertNever(state);
+  }
 }
 
-function stateLabel(state: string): string {
-  const labels: Record<string, string> = {
-    unrouted: 'Open',
-    routed: 'Sent',
-    link_clicked: 'Viewed',
-    awaiting_operator_confirm: 'Needs review',
-    answered: 'Answered',
-    expired: 'Expired',
-    paused: 'Paused',
-    snoozed: 'Snoozed',
-  };
-  return labels[state] ?? state.replace(/_/g, ' ');
+function stateLabel(state: DecisionEmailState): string {
+  switch (state) {
+    case 'unrouted':
+      return 'Open';
+    case 'routed':
+      return 'Sent';
+    case 'link_clicked':
+      return 'Viewed';
+    case 'awaiting_operator_confirm':
+      return 'Needs review';
+    case 'answered':
+      return 'Answered';
+    case 'expired':
+      return 'Expired';
+    case 'paused':
+      return 'Paused';
+    case 'snoozed':
+      return 'Snoozed';
+    default:
+      return assertNever(state);
+  }
 }
 
-function decisionCta(state: string | null): string {
-  if (state === 'awaiting_operator_confirm' || state === 'answered') return 'Review reply';
-  if (state === 'routed' || state === 'link_clicked') return 'Resend';
-  return 'Send to client';
+function decisionCta(state: DecisionEmailState | null): string {
+  if (state === null) return 'Send to client';
+  switch (state) {
+    case 'awaiting_operator_confirm':
+    case 'answered':
+      return 'Review reply';
+    case 'routed':
+    case 'link_clicked':
+      return 'Resend';
+    case 'unrouted':
+    case 'expired':
+    case 'paused':
+    case 'snoozed':
+      return 'Send to client';
+    default:
+      return assertNever(state);
+  }
 }
 
-function decisionOptionsCopy(owner: 'operator' | 'client' | 'unknown', state: string | null, options: { id: string; label: string }[], row: DecisionRow): string {
-  if (state === 'awaiting_operator_confirm') return 'Review reply';
-  if (state === 'answered') return `Answered: ${text(row.selected_option) ?? text(row.answer_label) ?? text(row.answer_value) ?? '—'}`;
-  if (state === 'routed' || state === 'link_clicked') {
-    if (options.length) {
-      const count = options.length;
-      return `Sent ${count} option${count === 1 ? '' : 's'}: ${options.slice(0, 3).map((option) => option.label).join(' · ')}`;
+function decisionOptionsCopy(owner: 'operator' | 'client' | 'unknown', state: DecisionEmailState | null, options: { id: string; label: string }[], row: DecisionRow): string {
+  if (state !== null) {
+    switch (state) {
+      case 'awaiting_operator_confirm':
+        return 'Review reply';
+      case 'answered':
+        return `Answered: ${text(row.selected_option) ?? text(row.answer_label) ?? text(row.answer_value) ?? '—'}`;
+      case 'routed':
+      case 'link_clicked': {
+        if (options.length) {
+          const count = options.length;
+          return `Sent ${count} option${count === 1 ? '' : 's'}: ${options.slice(0, 3).map((option) => option.label).join(' · ')}`;
+        }
+        return 'Sent — awaiting reply.';
+      }
+      case 'unrouted':
+      case 'expired':
+      case 'paused':
+      case 'snoozed':
+        break;
+      default:
+        return assertNever(state);
     }
-    return 'Sent — awaiting reply.';
   }
   if (options.length) return options.slice(0, 3).map((option) => option.label).join(' · ');
   if (owner === 'operator') return 'Free-form — answer in your own words.';

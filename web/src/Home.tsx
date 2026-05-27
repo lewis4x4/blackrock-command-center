@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
-  ago, sum, hoursOld, SEV_RANK, SEV_LABEL, HEALTH, colorFor, latelyLine, latelyTone, approveWorkOrder,
+  ago, sum, hoursOld, SEV_RANK, SEV_LABEL, HEALTH, appToneClass, latelyLine, latelyTone, approveWorkOrder,
   type AppRow, type ActivityEvent, type TriageItem, type BuildStatus, type IssueRow, type TriageSev, type AgentWorkOrder,
 } from './lib';
-import { CheckSyncPanel, OpenDecisionsPanel, ReviewBlockersPanel, ViewBuildPanel } from './TriagePanels';
+import { CheckSyncPanel, OpenDecisionsPanel, PortfolioBlockersPanel, ReviewBlockersPanel, ViewBuildPanel } from './TriagePanels';
 
 
 function appSlug(app: AppRow): string {
@@ -113,11 +113,11 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
           <div className="page-title">{activePage === 'files' ? 'Files' : activePage === 'agents' ? 'Agents' : activePage === 'apps' ? 'Apps' : activePage === 'settings' ? 'Settings' : activePage === 'decisions' ? 'Decisions' : activePage === 'workspace' ? 'Workspace' : activePage.startsWith('app:') ? 'Cockpit' : 'Home'}</div>
           <div className="topbar-right">
             <div className="mode-pill">
-              <span className="dot" style={{ background: demo ? 'var(--amber)' : 'var(--green)' }} />
+              <span className={'dot ' + (demo ? 'amber' : 'green')} />
               <span>{demo ? 'Demo data' : 'Live · control plane'}</span>
             </div>
             <div className="fresh-pill">
-              <span className="dot" style={{ background: 'var(--green)' }} />
+              <span className="dot green" />
               <span>Updated {ago(newest) ?? '—'}</span>
             </div>
             <button className={'refresh' + (spinning ? ' spin' : '')} onClick={() => void refresh()}>
@@ -154,6 +154,7 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
    ============================================================================ */
 export function HomeView({ apps, issues, activity, workOrders, demo, onResolved }: { apps: AppRow[]; issues: IssueRow[]; activity: ActivityEvent[]; workOrders: AgentWorkOrder[]; demo: boolean; onResolved: () => void | Promise<void> }) {
   const [openItem, setOpenItem] = useState<TriageItem | null>(null);
+  const [portfolioBlockersOpen, setPortfolioBlockersOpen] = useState(false);
   const sorted = [...apps].sort((a, b) => b.criticality - a.criticality);
   const appById = new Map(sorted.map((app) => [app.id, app]));
 
@@ -180,6 +181,23 @@ export function HomeView({ apps, issues, activity, workOrders, demo, onResolved 
       ? { t: 'Watch', c: 'amber' }
       : { t: 'Good', c: 'green' };
 
+  useEffect(() => {
+    const syncBlockedHash = () => setPortfolioBlockersOpen(window.location.hash === '#/?blocked=all' || window.location.hash === '#/blocked');
+    syncBlockedHash();
+    window.addEventListener('hashchange', syncBlockedHash);
+    return () => window.removeEventListener('hashchange', syncBlockedHash);
+  }, []);
+
+  function openPortfolioBlockers() {
+    if (window.location.hash === '#/?blocked=all') setPortfolioBlockersOpen(true);
+    else window.location.hash = '#/?blocked=all';
+  }
+
+  function closePortfolioBlockers() {
+    setPortfolioBlockersOpen(false);
+    if (window.location.hash === '#/?blocked=all' || window.location.hash === '#/blocked') window.location.hash = '#/';
+  }
+
   return (
     <>
       {/* Portfolio strip — all derived from v_command_center_home */}
@@ -188,7 +206,7 @@ export function HomeView({ apps, issues, activity, workOrders, demo, onResolved 
         <Cell k="Active" v={String(active)} />
         <Cell k="Triage" v={String(triage.length)} cls={triage.length ? 'amber' : 'green'} />
         <Cell k="Decisions" v={String(openDec)} cls={openDec ? 'amber' : ''} />
-        <Cell k="Blocked" v={String(blocked)} cls={blocked ? 'red' : ''} />
+        <Cell k="Blocked" v={String(blocked)} cls={blocked ? 'red' : ''} onOpen={blocked ? openPortfolioBlockers : undefined} ariaLabel={`Show ${blocked} blocked roadmap item${blocked === 1 ? '' : 's'}`} />
         <Cell k="Health" v={pf.t} cls={pf.c} small />
       </div>
 
@@ -197,6 +215,7 @@ export function HomeView({ apps, issues, activity, workOrders, demo, onResolved 
       <ProjectsBand apps={sorted} />
       <PrReviewBand orders={prOrders} apps={appById} />
       <ActivityBand activity={activity} />
+      {portfolioBlockersOpen && <PortfolioBlockersPanel apps={sorted} onClose={closePortfolioBlockers} />}
       {openItem && (
         <TriagePanelHost
           item={openItem}
@@ -242,13 +261,17 @@ function issueToTriage(issue: IssueRow, app?: AppRow): TriageItem | null {
   };
 }
 
-function Cell({ k, v, cls = '', small = false }: { k: string; v: string; cls?: string; small?: boolean }) {
-  return (
-    <div className="cell">
+function Cell({ k, v, cls = '', small = false, onOpen, ariaLabel }: { k: string; v: string; cls?: string; small?: boolean; onOpen?: () => void; ariaLabel?: string }) {
+  const content = (
+    <>
       <div className="ck">{k}</div>
-      <div className={'cv ' + cls} style={small ? { fontSize: 18 } : undefined}>{v}</div>
-    </div>
+      <div className={'cv ' + cls + (small ? ' small' : '')}>{v}</div>
+    </>
   );
+  if (onOpen) {
+    return <button type="button" className="cell cell-action" onClick={onOpen} aria-label={ariaLabel}>{content}</button>;
+  }
+  return <div className="cell">{content}</div>;
 }
 
 function TriagePanelHost({ item, demo, onClose, onResolved }: { item: TriageItem; demo: boolean; onClose: () => void; onResolved: () => void }) {
@@ -285,7 +308,7 @@ function TriageBand({ items, onOpen }: { items: TriageItem[]; onOpen: (item: Tri
         items.map((t, i) => (
           <div className={'triage-row ' + t.sev} key={t.id}>
             <div className="rank">{i + 1}</div>
-            <div className="badge" style={{ background: colorFor(t.app.short_code) }}>{t.app.short_code[0]}</div>
+            <div className={'badge app-badge ' + appToneClass(t.app.short_code)}>{t.app.short_code[0]}</div>
             <div className="triage-text">
               <div className="triage-title">{t.title}</div>
               <div className="triage-sub">{t.sub}{t.app.sample ? ' · sample' : ''}</div>
@@ -336,7 +359,7 @@ function AwaitingApprovalBand({ orders, apps, demo, onApproved }: { orders: Agen
           return (
             <div className="approval-card" key={order.id}>
               <div className="approval-top">
-                <div className="badge" style={{ background: colorFor(code) }}>{code[0]}</div>
+                <div className={'badge app-badge ' + appToneClass(code)}>{code[0]}</div>
                 <div>
                   <b>{app?.display_name ?? order.app.display_name ?? code}</b>
                   <span>{ago(order.created_at) ?? 'just now'} · {order.risk_class}</span>
@@ -385,7 +408,7 @@ export function ProjectGrid({ apps, onEdit }: { apps: AppRow[]; onEdit?: (app: A
 function AppCard({ app, onEdit }: { app: AppRow; onEdit?: (app: AppRow) => void }) {
   const head = (
     <div className="card-head">
-      <div className="badge" style={{ background: colorFor(app.short_code) }}>{app.short_code[0]}</div>
+      <div className={'badge app-badge ' + appToneClass(app.short_code)}>{app.short_code[0]}</div>
       <div className="card-headtext">
         <div className="card-name">
           {app.display_name}
@@ -433,20 +456,20 @@ function AppCard({ app, onEdit }: { app: AppRow; onEdit?: (app: AppRow) => void 
       <div className="card-sep" />
       <div className="row2">
         <span className="k">Client</span>
-        <span title={app.client_name || undefined} style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.client_name || '—'}</span>
+        <span className="row-value clip" title={app.client_name || undefined}>{app.client_name || '—'}</span>
       </div>
       <div className="row2">
         <span className="k">Lifecycle</span>
-        <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>{app.lifecycle_phase}</span>
+        <span className="row-value capitalize">{app.lifecycle_phase}</span>
       </div>
       <div className="row2">
         <span className="k">Build health</span>
-        <span className="health"><span className="dot" style={{ background: h.c }} />{h.t}</span>
+        <span className="health"><span className={'dot ' + (app.build_status === 'red' ? 'red' : app.build_status === 'yellow' ? 'amber' : app.build_status === 'green' ? 'green' : 'grey')} />{h.t}</span>
       </div>
       <div className="row2">
         <span className="k">Integrations</span>
         <span className="health">
-          <span className="dot" style={{ background: igLive ? 'var(--green)' : 'var(--grey)' }} />
+          <span className={'dot ' + (igLive ? 'green' : 'grey')} />
           {igLive} live · {igTot} total
         </span>
       </div>
@@ -454,7 +477,7 @@ function AppCard({ app, onEdit }: { app: AppRow; onEdit?: (app: AppRow) => void 
         <span className="prog-label">Roadmap progress</span>
         <span className="prog-val"><b>{shipped}</b> / {total} shipped</span>
       </div>
-      <div className="bar"><i style={{ width: pct + '%' }} /></div>
+      <div className="bar"><progress className="bar-progress" value={pct} max={100} aria-label={`Roadmap progress ${pct}%`} /></div>
       <div className="prog-foot">
         <span>{pct}% · {total - shipped} remaining</span>
         {d != null && (
@@ -468,15 +491,15 @@ function AppCard({ app, onEdit }: { app: AppRow; onEdit?: (app: AppRow) => void 
       <div className="card-sep" />
       <div className="row2">
         <span className="k">Open decisions</span>
-        <span style={{ fontWeight: 700, whiteSpace: 'nowrap', color: open ? 'var(--amber)' : 'var(--text)' }}>{open}</span>
+        <span className={'row-value strong' + (open ? ' amber' : '')}>{open}</span>
       </div>
       <div className="row2">
         <span className="k">Blocked work</span>
-        <span style={{ fontWeight: 700, whiteSpace: 'nowrap', color: blk ? 'var(--red)' : 'var(--text)' }}>{blk}</span>
+        <span className={'row-value strong' + (blk ? ' red' : '')}>{blk}</span>
       </div>
       <div className="row2">
         <span className="k">Last snapshot</span>
-        <span style={{ fontWeight: 700, whiteSpace: 'nowrap', color: freshClass === 'muted' ? 'var(--text-3)' : `var(--${freshClass})` }}>{fresh ?? '—'}</span>
+        <span className={'row-value strong ' + freshClass}>{fresh ?? '—'}</span>
       </div>
       <div className="card-foot">
         <button className="open-link" onClick={() => openApp(app)}>Open {app.short_code} {chevron}</button>
@@ -508,7 +531,7 @@ function PrReviewBand({ orders, apps }: { orders: AgentWorkOrder[]; apps: Map<st
           return (
             <div className="pr-row" key={order.id}>
               <div className="agents-app">
-                <span className="badge" style={{ background: colorFor(code) }}>{code[0]}</span>
+                <span className={'badge app-badge ' + appToneClass(code)}>{code[0]}</span>
                 <div>
                   <b>{app?.display_name ?? order.app.display_name ?? code}</b>
                   <span>{code}</span>
@@ -565,7 +588,7 @@ function ActivityBand({ activity }: { activity: ActivityEvent[] }) {
             return (
               <div className={'feed-row ' + tone} key={i}>
                 <div className="feed-ico">
-                  <div className="badge" style={{ width: 24, height: 24, fontSize: 10, background: colorFor(sc) }}>{sc[0]}</div>
+                  <div className={'badge app-badge app-badge-sm ' + appToneClass(sc)}>{sc[0]}</div>
                 </div>
                 <div className="feed-text">
                   <div className="feed-title">{sentence}</div>

@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from 'react';
 import {
-  ago, colorFor, loadAllDecisions, loadAuditPage, loadSettings,
+  ago, appToneClass, loadAllDecisions, loadAuditPage, loadSettings,
   type ActivityEvent, type AggregatorSchedule, type AllDecisionsPayload, type AuditPage, type DecisionAdminRow, type IntegrationsAppBreakdown,
   type IntegrationStatus, type SecretInventory, type SettingsPayload,
 } from './lib';
@@ -194,7 +194,7 @@ function IntegrationsBand({ apps, totals, loading }: { apps: IntegrationsAppBrea
               return (
                 <button className="settings-app-row" key={app.app_id} onClick={() => setOpenApp(open ? null : app.app_id)}>
                   <div className="agents-app">
-                    <span className="badge" style={{ background: colorFor(app.app_short_code) }}>{app.app_short_code[0]}</span>
+                    <span className={'badge app-badge ' + appToneClass(app.app_short_code)}>{app.app_short_code[0]}</span>
                     <div><b>{app.app_display_name}</b><span>{app.app_short_code}</span></div>
                   </div>
                   <span className="settings-muted">{app.integrations.length} integration{app.integrations.length === 1 ? '' : 's'}</span>
@@ -389,7 +389,7 @@ function SecretGroup({ title, secrets }: { title: string; secrets: SecretInvento
       <div className="settings-secret-chips">
         {secrets.map((secret) => (
           <div className="settings-secret-chip" key={`${title}-${secret.column}-${secret.ref_name}`}>
-            <span className="dot" style={{ background: secret.is_set ? 'var(--green)' : 'var(--grey)' }} />
+            <span className={'dot ' + (secret.is_set ? 'green' : 'grey')} />
             <b>{secret.ref_name}</b>
             <em>{secret.is_set ? 'SET' : 'NOT-SET'}</em>
             <small>{label(secret.column)}</small>
@@ -426,7 +426,7 @@ function InfoCard({ label: title, value, dot }: { label: string; value: string; 
   return (
     <div className="settings-info-card">
       <span>{title}</span>
-      <b>{dot && <i className="dot" style={{ background: dot === 'green' ? 'var(--green)' : 'var(--red)' }} />}{value}</b>
+      <b>{dot && <i className={'dot ' + dot} />}{value}</b>
     </div>
   );
 }
@@ -447,7 +447,7 @@ function Empty({ title, copy }: { title: string; copy: string }) {
 function SkeletonRows() {
   return (
     <div className="agents-skeleton">
-      {Array.from({ length: 3 }).map((_, i) => <div className="skel" key={i} style={{ height: 54 }} />)}
+      {Array.from({ length: 3 }).map((_, i) => <div className="skel skel-settings-row" key={i} />)}
     </div>
   );
 }

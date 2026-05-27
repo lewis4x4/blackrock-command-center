@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react';
 import {
-  acknowledgeHandoff, ago, approveWorkOrder, colorFor, loadAgents, loadHandoffs,
+  acknowledgeHandoff, ago, appToneClass, approveWorkOrder, loadAgents, loadHandoffs,
   type AgentRun, type AgentsPayload, type AgentWorkOrder, type CostLedgerRow, type OperatorHandoff, type RunnerStatus,
 } from './lib';
 
@@ -111,7 +111,7 @@ function RunnerStatusPill({ status }: { status: RunnerStatus }) {
   return (
     <section className={'runner-status ' + (status.online ? 'online' : 'offline')}>
       <div className="runner-status-main">
-        <span className="dot" style={{ background: status.online ? 'var(--green)' : 'var(--amber)' }} />
+        <span className={'dot ' + (status.online ? 'green' : 'amber')} />
         <b>{status.online ? `Runner online — last heartbeat ${ago(status.last_seen_at) ?? 'just now'}` : 'No runner deployed'}</b>
       </div>
       <div className="runner-status-copy">
@@ -429,7 +429,7 @@ function AppBadge({ app, fallbackId }: { app: { id?: string | null; short_code: 
   const code = app.short_code ?? fallbackId.slice(0, 3).toUpperCase();
   return (
     <div className="agents-app">
-      <span className="badge" style={{ background: colorFor(code) }}>{code[0] ?? '—'}</span>
+      <span className={'badge app-badge ' + appToneClass(code)}>{code[0] ?? '—'}</span>
       <div>
         <b>{app.display_name ?? code}</b>
         <span>{code}</span>
@@ -454,7 +454,7 @@ function InlineError({ message }: { message: string }) {
 function SkeletonRows() {
   return (
     <div className="agents-skeleton">
-      {Array.from({ length: 3 }).map((_, i) => <div className="skel" key={i} style={{ height: 46 }} />)}
+      {Array.from({ length: 3 }).map((_, i) => <div className="skel skel-agent-row" key={i} />)}
     </div>
   );
 }

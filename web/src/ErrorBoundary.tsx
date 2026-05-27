@@ -21,7 +21,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
         <div className="err-wrap">
           <div className="err-h">Something went wrong</div>
           <div className="err-detail">{this.state.message || 'Unknown render error'}</div>
-          <button className="btn-primary" style={{ width: 'auto', padding: '11px 22px' }} onClick={() => window.location.reload()}>
+          <button className="btn-primary err-retry" onClick={() => window.location.reload()}>
             Reload
           </button>
         </div>

@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
+import { useFocusTrap } from './hooks/useFocusTrap';
 
 export function SlideOver({
   open,
@@ -16,60 +17,7 @@ export function SlideOver({
   footer?: ReactNode;
 }) {
   const panelRef = useRef<HTMLElement | null>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    const focusableSelector = [
-      'a[href]',
-      'button:not([disabled])',
-      'input:not([disabled])',
-      'select:not([disabled])',
-      'textarea:not([disabled])',
-      '[tabindex]:not([tabindex="-1"])',
-    ].join(',');
-
-    const focusFirstControl = () => {
-      const focusable = panelRef.current?.querySelector<HTMLElement>(focusableSelector);
-      focusable?.focus();
-    };
-
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        onClose();
-        return;
-      }
-      if (ev.key !== 'Tab') return;
-      const focusable = Array.from(panelRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
-        .filter((el) => el.offsetParent !== null || el === document.activeElement);
-      if (focusable.length === 0) {
-        ev.preventDefault();
-        panelRef.current?.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (ev.shiftKey && document.activeElement === first) {
-        ev.preventDefault();
-        last.focus();
-      } else if (!ev.shiftKey && document.activeElement === last) {
-        ev.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener('keydown', onKey);
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    window.setTimeout(focusFirstControl, 0);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = previous;
-      restoreFocusRef.current?.focus();
-    };
-  }, [open, onClose]);
+  useFocusTrap({ active: open, containerRef: panelRef, onEscape: onClose });
 
   if (!open) return null;
 

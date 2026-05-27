@@ -374,7 +374,7 @@ export const FilesView = forwardRef<FilesViewHandle>(function FilesView(_props, 
 function FilesSkeleton() {
   return (
     <div className="files-skeleton">
-      {Array.from({ length: 8 }).map((_, i) => <div className="skel" style={{ height: 38 }} key={i} />)}
+      {Array.from({ length: 8 }).map((_, i) => <div className="skel skel-file-row" key={i} />)}
     </div>
   );
 }
@@ -410,7 +410,7 @@ function FilesError({ message, onRetry }: { message: string; onRetry: () => void
       <div className="err-h">Couldn't read the file index</div>
       <div className="err-p">The Files surface reads the cc-read-artifacts edge function with a GET request.</div>
       <div className="err-detail">{message}</div>
-      <button className="btn-primary" style={{ width: 'auto', padding: '11px 22px' }} onClick={() => void onRetry()}>
+      <button className="btn-primary err-retry" onClick={() => void onRetry()}>
         Retry
       </button>
     </div>

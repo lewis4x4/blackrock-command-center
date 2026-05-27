@@ -6,6 +6,7 @@ export const INITIAL_DEMO =
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? '';
 export const FUNCTIONS_URL = (import.meta.env.VITE_CC_FUNCTIONS_URL ?? `${SUPABASE_URL}/functions/v1`).replace(/\/$/, '');
 export const READ_TOKEN = import.meta.env.VITE_CC_READ_TOKEN ?? '';
+export const WRITE_TOKEN = import.meta.env.VITE_CC_WRITE_TOKEN ?? '';
 export const ACCESS_REQUIRED = (import.meta.env.VITE_CC_ACCESS_REQUIRED ?? 'false') === 'true';
 
 export function sum(o: unknown): number {
@@ -36,6 +37,19 @@ export const APP_COLOR: Record<string, string> = {
 
 export function colorFor(code: string): string {
   return APP_COLOR[code] ?? '#5A6275';
+}
+
+export function appToneClass(code: string | null | undefined): string {
+  const key = (code ?? '').trim().toUpperCase();
+  if (key === 'QEP') return 'app-qep';
+  if (key === 'SCC') return 'app-scc';
+  if (key === 'COL') return 'app-col';
+  if (key === 'FND') return 'app-fnd';
+  return 'app-default';
+}
+
+export function assertNever(value: never): never {
+  throw new Error(`Unexpected value: ${String(value)}`);
 }
 
 export const HEALTH: Record<'green' | 'yellow' | 'red' | 'unknown', { c: string; t: string }> = {

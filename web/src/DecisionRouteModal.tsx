@@ -3,6 +3,7 @@ import {
   decisionRowTitle, loadDecisionRecipients, loadDecisionSend, routeDecision, rewriteDecision,
   type DecisionEmailSend, type DecisionOptionLike, type DecisionRecipient, type RiskClass,
 } from './lib';
+import { useFocusTrap } from './hooks/useFocusTrap';
 
 type Props = {
   open: boolean;
@@ -28,7 +29,7 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
   const [options, setOptions] = useState<DecisionOptionLike[]>([]);
 
   const modalRef = useRef<HTMLDivElement | null>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  useFocusTrap({ active: open, containerRef: modalRef, onEscape: onClose });
 
   const rawTitle = decisionRowTitle(decision);
   const rawBody = text(decision.summary) ?? text(decision.body) ?? text(decision.description) ?? '';
@@ -105,58 +106,6 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
     return () => { cancelled = true; };
   }, [open, appId, demo, issueId, rawBody, rawOptions, rawTitle, decision]);
 
-  useEffect(() => {
-    if (!open) return;
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    const focusableSelector = [
-      'a[href]',
-      'button:not([disabled])',
-      'input:not([disabled])',
-      'select:not([disabled])',
-      'textarea:not([disabled])',
-      '[tabindex]:not([tabindex="-1"])',
-    ].join(',');
-
-    const focusFirstControl = () => {
-      const focusable = modalRef.current?.querySelector<HTMLElement>(focusableSelector);
-      focusable?.focus();
-    };
-
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        onClose();
-        return;
-      }
-      if (ev.key !== 'Tab') return;
-      const focusable = Array.from(modalRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
-        .filter((el) => el.offsetParent !== null || el === document.activeElement);
-      if (focusable.length === 0) {
-        ev.preventDefault();
-        modalRef.current?.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (ev.shiftKey && document.activeElement === first) {
-        ev.preventDefault();
-        last.focus();
-      } else if (!ev.shiftKey && document.activeElement === last) {
-        ev.preventDefault();
-        first.focus();
-      }
-    };
-
-    window.addEventListener('keydown', onKey);
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    window.setTimeout(focusFirstControl, 0);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = previous;
-      restoreFocusRef.current?.focus();
-    };
-  }, [open, onClose]);
 
   if (!open) return null;
 

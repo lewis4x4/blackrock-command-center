@@ -11,7 +11,7 @@
    Live mode reads the control-plane edge functions (gsvhuzpysxaegoecwjmf).
    Every value rendered traces to a backend payload — nothing is invented.
    ============================================================================ */
-import { ACCESS_REQUIRED, ago, FUNCTIONS_URL, hoursOld, sum, colorFor, APP_COLOR, HEALTH, READ_TOKEN, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
+import { ACCESS_REQUIRED, ago, FUNCTIONS_URL, hoursOld, sum, colorFor, APP_COLOR, HEALTH, READ_TOKEN, WRITE_TOKEN, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
 
 /* ───────────────────── Types — the cc-read-home contract ───────────────── */
 export type BuildStatus = 'green' | 'yellow' | 'red' | 'unknown';
@@ -682,8 +682,7 @@ function readHeaders(): Record<string, string> {
 }
 
 function writeHeaders(): Record<string, string> {
-  const writeToken = import.meta.env.VITE_CC_WRITE_TOKEN ?? '';
-  return { ...readHeaders(), 'x-cc-write-token': writeToken };
+  return { ...readHeaders(), 'x-cc-write-token': WRITE_TOKEN };
 }
 
 function cleanError(prefix: string, status: number, payload: unknown): Error {
@@ -1434,7 +1433,7 @@ export async function acknowledgeHandoff(handoffId: string, status: 'acknowledge
 }
 
 /* ───────────────────── Helpers ──────────────────────────────────────────── */
-export { ago, hoursOld, sum, colorFor, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
+export { ago, hoursOld, sum, colorFor, appToneClass, assertNever, APP_COLOR, HEALTH, SEV_RANK, SEV_LABEL, INITIAL_DEMO } from './utils';
 
 export type LatelyTone = 'plain' | 'needs' | 'failure';
 

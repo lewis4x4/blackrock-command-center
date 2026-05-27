@@ -153,8 +153,8 @@ function Loading() {
       <div className="strip">
         {Array.from({ length: 6 }).map((_, i) => (
           <div className="cell" key={i}>
-            <div className="skel" style={{ height: 14, width: '60%' }} />
-            <div className="skel" style={{ height: 22, width: '40%', marginTop: 8 }} />
+            <div className="skel skel-k" />
+            <div className="skel skel-v" />
           </div>
         ))}
       </div>
@@ -164,8 +164,8 @@ function Loading() {
           <div className="band-title">What needs you</div>
         </div>
         {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} style={{ padding: '14px 18px', borderTop: '1px solid var(--line)' }}>
-            <div className="skel" style={{ height: 38 }} />
+          <div key={i} className="skel-row-wrap">
+            <div className="skel skel-row" />
           </div>
         ))}
       </div>
@@ -176,7 +176,7 @@ function Loading() {
         </div>
         <div className="grid">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div className="skel" key={i} style={{ height: 230 }} />
+            <div className="skel skel-card" key={i} />
           ))}
         </div>
       </div>
@@ -198,7 +198,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
         <div className="err-h">Couldn't reach the control plane</div>
         <div className="err-p">The Home reads the <b>cc-read-home</b> edge function.</div>
         <div className="err-detail">{message}</div>
-        <button className="btn-primary" style={{ width: 'auto', padding: '11px 22px' }} onClick={onRetry}>
+        <button className="btn-primary err-retry" onClick={onRetry}>
           Retry
         </button>
       </div>
