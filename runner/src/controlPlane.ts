@@ -83,6 +83,7 @@ export interface ControlPlane {
   renewLease(workOrderId: string, runnerId: string, leaseSeconds: number): Promise<WorkOrder | null>;
   completeWorkOrder(workOrderId: string, prUrl: string): Promise<WorkOrder>;
   failWorkOrder(workOrderId: string, runnerId: string, error: string): Promise<WorkOrder>;
+  listRunningAgentWorkOrderIds(): Promise<string[]>;
   createAgentRun(workOrderId: string, runner: string): Promise<AgentRun>;
   heartbeatAgentRun(runId: string, usage?: UsageUpdate): Promise<AgentRun>;
   finishAgentRun(runId: string, input: FinishRunInput): Promise<AgentRun>;
@@ -161,6 +162,15 @@ export class SupabaseControlPlane implements ControlPlane {
       p_runner: runnerId,
       p_error: error.slice(0, 2000),
     });
+  }
+
+  async listRunningAgentWorkOrderIds(): Promise<string[]> {
+    const query = new URLSearchParams({
+      status: "eq.running",
+      select: "work_order_id",
+    });
+    const rows = await this.rest<Array<{ work_order_id: string | null }>>(`/rest/v1/agent_runs?${query.toString()}`);
+    return [...new Set(rows.map((row) => row.work_order_id?.trim()).filter((id): id is string => !!id))];
   }
 
   async createAgentRun(workOrderId: string, runner: string): Promise<AgentRun> {

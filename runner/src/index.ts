@@ -44,6 +44,7 @@ async function main(): Promise<void> {
       runnerId: config.runnerId,
       leaseSeconds: config.leaseSeconds,
       pollIntervalSeconds: config.pollIntervalSeconds,
+      workspaceRoot: config.workspaceRoot,
       extractionAutoCommitConfidence: config.extractionAutoCommitConfidence,
       extractionOffTopicFloor: config.extractionOffTopicFloor,
     },

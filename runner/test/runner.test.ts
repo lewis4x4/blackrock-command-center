@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockWorkspaceManager } from "../src/workspace";
-import { executeExtractionTask, executeWorkOrder, parseExtractionOutput, type RunnerDeps } from "../src/runner";
+import { executeExtractionTask, executeWorkOrder, notifyTelegramWithRetry, parseExtractionOutput, sweepOrphanWorkspaces, type RunnerDeps } from "../src/runner";
 import { MockGitHubApp } from "../src/githubApp";
 import type { AgentRun, ControlPlane, ExtractionTask, FinishRunInput, RewriteTask, UsageUpdate, WorkOrder } from "../src/controlPlane";
 import type { ClaudeCodeRunner, ClaudeGoalInput, ClaudeGoalResult, ClaudePromptInput } from "../src/claudeCode";
@@ -51,6 +51,7 @@ class FakeControlPlane implements ControlPlane {
   finishedRuns: FinishRunInput[] = [];
   heartbeats = 0;
   audits: Array<{ eventType: string; actor: string }> = [];
+  runningAgentWorkOrderIds: string[] = [];
 
   async claimWorkOrder(): Promise<WorkOrder | null> { return null; }
   async claimRewriteTask(): Promise<RewriteTask | null> { return null; }
@@ -70,6 +71,7 @@ class FakeControlPlane implements ControlPlane {
     this.failed.push({ workOrderId, runnerId, error });
     return sampleWorkOrder({ status: "failed" });
   }
+  async listRunningAgentWorkOrderIds(): Promise<string[]> { return this.runningAgentWorkOrderIds; }
   async createAgentRun(workOrderId: string, runner: string): Promise<AgentRun> {
     return {
       id: "run-1",
@@ -199,6 +201,62 @@ describe("executeWorkOrder", () => {
     expect(controlPlane.finishedRuns[0]?.status).toBe("failed");
     expect(controlPlane.audits.map((a) => a.eventType)).toContain("agent_failed");
     expect(existsSync(join(root, workOrder.id))).toBe(false);
+  });
+});
+
+describe("sweepOrphanWorkspaces", () => {
+  test("deletes non-running workspace directories and preserves running runs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-runner-sweep-test-"));
+    tempRoots.push(root);
+    await mkdir(join(root, "running-wo"));
+    await mkdir(join(root, "finished-wo"));
+    await mkdir(join(root, "no-agent-run"));
+    const controlPlane = new FakeControlPlane();
+    controlPlane.runningAgentWorkOrderIds = ["running-wo"];
+
+    await sweepOrphanWorkspaces({ controlPlane, logger: createLogger("runner-test") }, root);
+    await sweepOrphanWorkspaces({ controlPlane, logger: createLogger("runner-test") }, root);
+
+    expect(existsSync(join(root, "running-wo"))).toBe(true);
+    expect(existsSync(join(root, "finished-wo"))).toBe(false);
+    expect(existsSync(join(root, "no-agent-run"))).toBe(false);
+  });
+});
+
+describe("notifyTelegramWithRetry", () => {
+  const payload = {
+    event_type: "work_order_pr_opened" as const,
+    severity: "normal" as const,
+    title: "PR ready for review",
+    body: "Body",
+  };
+
+  test("succeeds on the second bounded retry", async () => {
+    const sleeps: number[] = [];
+    let attempts = 0;
+
+    await notifyTelegramWithRetry(async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("transient Telegram failure");
+    }, payload, async (ms) => {
+      sleeps.push(ms);
+    });
+
+    expect(attempts).toBe(3);
+    expect(sleeps).toEqual([250, 1000]);
+  });
+
+  test("stops before retrying non-retryable HTTP 4xx failures", async () => {
+    let attempts = 0;
+
+    await expect(notifyTelegramWithRetry(async () => {
+      attempts += 1;
+      throw new Error("cc-telegram-notify returned HTTP 401: unauthorized");
+    }, payload, async () => {
+      throw new Error("should not sleep for non-retryable failures");
+    })).rejects.toThrow("HTTP 401");
+
+    expect(attempts).toBe(1);
   });
 });
 

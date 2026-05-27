@@ -1,3 +1,6 @@
+import { readdir, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import type { ClaudeCodeRunner, ClaudeGoalResult } from "./claudeCode";
 import type { ControlPlane, ExtractionTask, RewriteTask, WorkOrder } from "./controlPlane";
 import type { GitHubPullRequestClient, GitHubTokenProvider } from "./githubApp";
@@ -30,6 +33,7 @@ export type RunnerOptions = {
   runnerId: string;
   leaseSeconds: number;
   pollIntervalSeconds: number;
+  workspaceRoot: string;
   extractionAutoCommitConfidence: number;
   extractionOffTopicFloor: number;
 };
@@ -59,10 +63,12 @@ export class RunnerDaemon {
   }
 
   async runForever(): Promise<void> {
+    await sweepOrphanWorkspaces(this.deps, this.options.workspaceRoot);
     this.deps.logger.info("runner daemon started", {
       runner_id: this.options.runnerId,
       poll_interval_seconds: this.options.pollIntervalSeconds,
       lease_seconds: this.options.leaseSeconds,
+      workspace_root: this.options.workspaceRoot,
     });
     this.deps.logger.info("rewrite_decision poll loop started", {
       runner_id: this.options.runnerId,
@@ -97,6 +103,81 @@ export class RunnerDaemon {
     if (this.current) await this.current;
     this.deps.logger.info("runner daemon stopped");
   }
+}
+
+export async function sweepOrphanWorkspaces(
+  deps: Pick<RunnerDeps, "controlPlane" | "logger">,
+  workspaceRoot: string,
+): Promise<void> {
+  if (isUnsafeWorkspaceRoot(workspaceRoot)) {
+    deps.logger.error("workspace startup sweep skipped; unsafe workspace root", {
+      workspace_root: workspaceRoot,
+      orphan_reason: "unsafe_workspace_root",
+    });
+    return;
+  }
+
+  let protectedWorkOrderIds: Set<string>;
+  try {
+    protectedWorkOrderIds = new Set(await deps.controlPlane.listRunningAgentWorkOrderIds());
+  } catch (error) {
+    deps.logger.error("workspace startup sweep skipped; failed to list running agent runs", {
+      workspace_root: workspaceRoot,
+      error: compactError(error),
+    });
+    return;
+  }
+
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try {
+    entries = await readdir(workspaceRoot, { withFileTypes: true });
+  } catch (error) {
+    if (isNodeErrorCode(error, "ENOENT")) {
+      deps.logger.info("workspace startup sweep skipped; workspace root does not exist", {
+        workspace_root: workspaceRoot,
+        protected_running_runs: protectedWorkOrderIds.size,
+      });
+      return;
+    }
+    deps.logger.error("workspace startup sweep skipped; failed to read workspace root", {
+      workspace_root: workspaceRoot,
+      error: compactError(error),
+    });
+    return;
+  }
+
+  let deleted = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const workspacePath = join(workspaceRoot, entry.name);
+    if (protectedWorkOrderIds.has(entry.name)) {
+      deps.logger.debug("workspace startup sweep protected running workspace", {
+        workspace_path: workspacePath,
+        work_order_id: entry.name,
+      });
+      continue;
+    }
+    try {
+      await rm(workspacePath, { recursive: true, force: true });
+      deleted += 1;
+      deps.logger.info("workspace startup sweep deleted orphan workspace", {
+        workspace_path: workspacePath,
+        orphan_reason: "no_running_agent_run",
+      });
+    } catch (error) {
+      deps.logger.error("workspace startup sweep failed to delete orphan workspace", {
+        workspace_path: workspacePath,
+        orphan_reason: "no_running_agent_run",
+        error: compactError(error),
+      });
+    }
+  }
+
+  deps.logger.info("workspace startup sweep completed", {
+    workspace_root: workspaceRoot,
+    deleted,
+    protected_running_runs: protectedWorkOrderIds.size,
+  });
 }
 
 export async function executeRewriteTask(task: RewriteTask, deps: Pick<RunnerDeps, "controlPlane" | "claudeCode" | "logger">, options: Pick<RunnerOptions, "runnerId">): Promise<ExecuteResult> {
@@ -416,6 +497,7 @@ export async function executeWorkOrder(workOrder: WorkOrder, deps: RunnerDeps, o
     if (installationIdResult.status === "rejected") throw installationIdResult.reason;
     if (workspaceResult.status === "rejected") throw workspaceResult.reason;
     if (!workspace) throw new Error("workspace creation returned no workspace");
+    if (!runId) throw new Error("agent run creation returned no run id");
     const installationId = installationIdResult.value;
     leaseMonitor = new LeaseMonitor({
       controlPlane,
@@ -607,15 +689,16 @@ class LeaseMonitor {
 
 async function notifyPrOpened(deps: RunnerDeps, runnerId: string, workOrder: WorkOrder, prUrl: string): Promise<void> {
   if (!deps.telegramNotifier) return;
+  const payload: TelegramNotifyPayload = {
+    event_type: "work_order_pr_opened",
+    severity: "normal",
+    app_id: workOrder.app_id,
+    title: "PR ready for review",
+    body: `Work order ${workOrder.id} opened a PR for ${workOrder.target_repo}.`,
+    deep_link: prUrl,
+  };
   try {
-    await deps.telegramNotifier({
-      event_type: "work_order_pr_opened",
-      severity: "normal",
-      app_id: workOrder.app_id,
-      title: "PR ready for review",
-      body: `Work order ${workOrder.id} opened a PR for ${workOrder.target_repo}.`,
-      deep_link: prUrl,
-    });
+    await notifyTelegramWithRetry(deps.telegramNotifier, payload);
   } catch (error) {
     const message = compactError(error);
     deps.logger.error("telegram notification failed", { work_order_id: workOrder.id, error: message });
@@ -626,6 +709,28 @@ async function notifyPrOpened(deps: RunnerDeps, runnerId: string, workOrder: Wor
       error: message,
     });
   }
+}
+
+const TELEGRAM_NOTIFY_RETRY_DELAYS_MS = [250, 1000] as const;
+
+export async function notifyTelegramWithRetry(
+  notifier: TelegramNotifier,
+  payload: TelegramNotifyPayload,
+  sleepFn: (ms: number) => Promise<void> = delay,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= TELEGRAM_NOTIFY_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      await notifier(payload);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (isNonRetryableHttp4xx(error) || attempt === TELEGRAM_NOTIFY_RETRY_DELAYS_MS.length) break;
+      const retryDelayMs = TELEGRAM_NOTIFY_RETRY_DELAYS_MS[attempt];
+      if (retryDelayMs != null) await sleepFn(retryDelayMs);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function retryCompleteWorkOrder(controlPlane: ControlPlane, workOrderId: string, prUrl: string, leaseMonitor: LeaseMonitor): Promise<void> {
@@ -765,4 +870,24 @@ async function sleep(ms: number, shouldStop: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, duration));
     waited += duration;
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNonRetryableHttp4xx(error: unknown): boolean {
+  const message = compactError(error);
+  const match = message.match(/\bHTTP\s+(4\d\d)\b/i);
+  return !!match;
+}
+
+function isNodeErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === code;
+}
+
+function isUnsafeWorkspaceRoot(workspaceRoot: string): boolean {
+  const root = resolve(workspaceRoot);
+  const home = process.env.HOME ? resolve(process.env.HOME) : null;
+  return root === resolve("/") || root === resolve(tmpdir()) || (home != null && root === home);
 }

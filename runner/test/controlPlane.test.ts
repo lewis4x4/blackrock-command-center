@@ -46,10 +46,11 @@ describe("SupabaseControlPlane", () => {
 
   test("agent_runs insert, heartbeat, finish, and installation lookup use REST table shapes", async () => {
     const run = { id: "run-1", work_order_id: "wo-1", runner: "claude_code_goal", started_at: "now", finished_at: null, heartbeat_at: null, status: "running", cost_usd: null, tokens_input: null, tokens_output: null, pr_url: null, notes: null };
-    const { calls, fetchImpl } = makeFetch([[run], [{ ...run, heartbeat_at: "later" }], [{ ...run, status: "succeeded", pr_url: "pr" }], [{ github_install_id: "98765" }], []]);
+    const { calls, fetchImpl } = makeFetch([[run], [{ work_order_id: "wo-1" }, { work_order_id: "wo-1" }, { work_order_id: "wo-2" }], [{ ...run, heartbeat_at: "later" }], [{ ...run, status: "succeeded", pr_url: "pr" }], [{ github_install_id: "98765" }], []]);
     const cp = new SupabaseControlPlane("https://cp.example", "service-key", fetchImpl);
 
     await cp.createAgentRun("wo-1", "claude_code_goal");
+    const runningWorkOrderIds = await cp.listRunningAgentWorkOrderIds();
     await cp.heartbeatAgentRun("run-1", { costUsd: 0.2, tokensInput: 11 });
     await cp.finishAgentRun("run-1", { status: "succeeded", prUrl: "pr", notes: "done", costUsd: 0.3, tokensOutput: 22 });
     const installId = await cp.getGitHubInstallationId("app-1");
@@ -60,17 +61,20 @@ describe("SupabaseControlPlane", () => {
     expect((calls[0]?.init.headers as Record<string, string>).Prefer).toBe("return=representation");
     expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({ work_order_id: "wo-1", runner: "claude_code_goal", status: "running" });
 
-    expect(calls[1]?.url).toBe("https://cp.example/rest/v1/agent_runs?id=eq.run-1");
-    expect(calls[1]?.init.method).toBe("PATCH");
-    expect(JSON.parse(String(calls[1]?.init.body))).toMatchObject({ cost_usd: 0.2, tokens_input: 11 });
+    expect(calls[1]?.url).toBe("https://cp.example/rest/v1/agent_runs?status=eq.running&select=work_order_id");
+    expect(runningWorkOrderIds).toEqual(["wo-1", "wo-2"]);
 
     expect(calls[2]?.url).toBe("https://cp.example/rest/v1/agent_runs?id=eq.run-1");
-    expect(JSON.parse(String(calls[2]?.init.body))).toMatchObject({ status: "succeeded", pr_url: "pr", notes: "done", cost_usd: 0.3, tokens_output: 22 });
+    expect(calls[2]?.init.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[2]?.init.body))).toMatchObject({ cost_usd: 0.2, tokens_input: 11 });
 
-    expect(calls[3]?.url).toBe("https://cp.example/rest/v1/registry_app_repo?app_id=eq.app-1&select=github_install_id&limit=1");
+    expect(calls[3]?.url).toBe("https://cp.example/rest/v1/agent_runs?id=eq.run-1");
+    expect(JSON.parse(String(calls[3]?.init.body))).toMatchObject({ status: "succeeded", pr_url: "pr", notes: "done", cost_usd: 0.3, tokens_output: 22 });
+
+    expect(calls[4]?.url).toBe("https://cp.example/rest/v1/registry_app_repo?app_id=eq.app-1&select=github_install_id&limit=1");
     expect(installId).toBe("98765");
 
-    expect(calls[4]?.url).toBe("https://cp.example/rest/v1/cc_audit_events");
-    expect(JSON.parse(String(calls[4]?.init.body))).toEqual({ app_id: "app-1", actor: "runner", event_type: "agent_dispatched", detail: { work_order_id: "wo-1" } });
+    expect(calls[5]?.url).toBe("https://cp.example/rest/v1/cc_audit_events");
+    expect(JSON.parse(String(calls[5]?.init.body))).toEqual({ app_id: "app-1", actor: "runner", event_type: "agent_dispatched", detail: { work_order_id: "wo-1" } });
   });
 });
