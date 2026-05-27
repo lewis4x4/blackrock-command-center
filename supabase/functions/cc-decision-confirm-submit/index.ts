@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { cleanString, cpPatch, hmacSha256Hex, isRecord, json, rpc, RpcError, rpcErrorResponse, UUID_RE } from "../_shared/phase5.ts";
+import { cleanString, cpPatch, hmacSha256Hex, isRecord, json, notifyCoRecipientsFireAndForget, rpc, RpcError, rpcErrorResponse, UUID_RE } from "../_shared/phase5.ts";
 
 const MAGIC_SECRET = Deno.env.get("CC_MAGIC_LINK_SECRET") ?? "";
 const PUBLIC_APP_ORIGIN = new URL(Deno.env.get("CC_PUBLIC_DECISION_BASE_URL") ?? "https://blackrockai-command-center.netlify.app").origin;
@@ -35,7 +35,10 @@ Deno.serve(async (req) => {
       p_option_id: optionId,
       p_actor: "client-magic-link",
     });
-    await markSendAnswered(sendId, optionId, tokenHash, decisionAnswerIdFromResult(result));
+    const decisionAnswerId = decisionAnswerIdFromResult(result);
+    await markSendAnswered(sendId, optionId, tokenHash, decisionAnswerId);
+    const notifyPayload = coRecipientNotifyPayloadFromResult(result, decisionAnswerId);
+    if (notifyPayload) notifyCoRecipientsFireAndForget(notifyPayload, "cc-decision-confirm-submit");
     return publicJson(req, { result }, 200, {
       "Cache-Control": "no-store",
     });
@@ -60,6 +63,15 @@ async function markSendAnswered(sendId: string, optionId: string, tokenHash: str
       last_error: null,
     },
   );
+}
+
+function coRecipientNotifyPayloadFromResult(result: unknown, decisionAnswerId: string): { issue_id: string; decision_external_ref: string; answer_id: string; app_id: string } | null {
+  const send = isRecord(result) && isRecord(result.send) ? result.send : null;
+  const issueId = cleanString(send?.issue_id, 80);
+  const appId = cleanString(send?.app_id, 80);
+  const decisionExternalRef = cleanString(send?.decision_external_ref, 200);
+  if (!issueId || !UUID_RE.test(issueId) || !appId || !UUID_RE.test(appId) || !decisionExternalRef) return null;
+  return { issue_id: issueId, app_id: appId, decision_external_ref: decisionExternalRef, answer_id: decisionAnswerId };
 }
 
 function decisionAnswerIdFromResult(result: unknown): string {

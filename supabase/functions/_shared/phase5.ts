@@ -8,6 +8,13 @@ export const ACCESS_AUD = Deno.env.get("CC_ACCESS_AUD") ?? "";
 export const CC_READ_TOKEN = Deno.env.get("CC_READ_TOKEN") ?? "";
 export const CC_WRITE_TOKEN = Deno.env.get("CC_WRITE_TOKEN") ?? "";
 
+export type CoRecipientNotifyPayload = {
+  issue_id: string;
+  decision_external_ref: string;
+  answer_id: string;
+  app_id: string;
+};
+
 export const cpHeaders = {
   apikey: CP_KEY,
   Authorization: `Bearer ${CP_KEY}`,
@@ -66,6 +73,27 @@ export function cleanString(value: unknown, max = 500): string | null {
   const raw = asString(value)?.trim();
   if (!raw) return null;
   return raw.length > max ? raw.slice(0, max) : raw;
+}
+
+export function formatNameList(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+export function formatCoRecipients(rows: unknown[]): string | null {
+  const names = rows.filter(isRecord).map(recipientDisplayName).filter((v): v is string => !!v);
+  if (names.length === 0) return null;
+  return `Also sent to: ${formatNameList(names)}.`;
+}
+
+function recipientDisplayName(row: Record<string, unknown>): string | null {
+  return cleanString(row.recipient_name, 160) ?? localPart(cleanString(row.recipient_email, 320));
+}
+
+function localPart(email: string | null): string | null {
+  if (!email) return null;
+  return email.split("@")[0] || null;
 }
 
 export function asArray(value: unknown): unknown[] {
@@ -171,6 +199,37 @@ export async function cpPatch<T = unknown>(path: string, row: unknown): Promise<
 export async function cpAudit(appId: string | null, actor: string, eventType: string, detail: Record<string, unknown>): Promise<void> {
   const r = await fetch(`${CP_URL}/rest/v1/cc_audit_events`, { method: "POST", headers: { ...cpHeaders, Prefer: "return=minimal" }, body: JSON.stringify({ app_id: appId, actor, event_type: eventType, detail }) });
   if (!r.ok) throw new Error(`audit write failed -> ${r.status} ${await r.text()}`);
+}
+
+export function notifyCoRecipientsFireAndForget(payload: CoRecipientNotifyPayload, actor = "co-recipient-notify-enqueue"): void {
+  const promise = (async () => {
+    try {
+      if (!CC_WRITE_TOKEN) throw new Error("CC_WRITE_TOKEN is not configured");
+      const r = await fetch(`${CP_URL}/functions/v1/cc-notify-co-recipients`, {
+        method: "POST",
+        signal: AbortSignal.timeout(5000),
+        headers: { "Content-Type": "application/json", "x-cc-write-token": CC_WRITE_TOKEN },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error(`cc-notify-co-recipients -> ${r.status} ${await r.text()}`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      try {
+        await cpAudit(payload.app_id, actor, "co_recipient_notify_failed", {
+          issue_id: payload.issue_id,
+          decision_external_ref: payload.decision_external_ref,
+          answer_id: payload.answer_id,
+          error: message,
+        });
+      } catch (auditError) {
+        console.log("[co-recipient-notify-enqueue] audit failed", auditError instanceof Error ? auditError.message : String(auditError));
+      }
+    }
+  })();
+
+  const runtime = globalThis as unknown as { EdgeRuntime?: { waitUntil?: (promise: Promise<unknown>) => void } };
+  if (typeof runtime.EdgeRuntime?.waitUntil === "function") runtime.EdgeRuntime.waitUntil(promise);
+  else void promise;
 }
 
 export function rpcErrorResponse(e: RpcError, accessCheck: "noop" | "pass" = "noop"): Response {

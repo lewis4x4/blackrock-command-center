@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, encodeRfc2047HeaderValue, escapeHtml, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpInsert, cpPatch, encodeRfc2047HeaderValue, escapeHtml, formatCoRecipients, gmailSend, hmacSha256Hex, isRecord, json, randomToken, rpc, stripHeaderUnsafe, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-auto-route-decisions";
 const TOGGLE_TOKEN = Deno.env.get("CC_AUTO_ROUTE_TOGGLE_TOKEN") ?? "";
@@ -352,29 +352,13 @@ function composeMessage(input: { sendId: string; toName: string; toEmail: string
 async function siblingAwarenessLine(appId: string, decisionExternalRef: string, currentSendId: string): Promise<string | null> {
   if (!decisionExternalRef) return null;
   const rows = await cpGet(`cc_decision_email_sends?app_id=eq.${appId}&decision_external_ref=eq.${encodeURIComponent(decisionExternalRef)}&id=neq.${currentSendId}&deleted_at=is.null&select=recipient_name,recipient_email`);
-  const names = rows.filter(isRecord).map(recipientDisplayName).filter((v): v is string => !!v);
-  if (names.length === 0) return null;
-  return `Also sent to ${formatNameList(names)}.`;
+  return formatCoRecipients(rows);
 }
 
 function appendSiblingAwareness(body: string, line: string | null): string {
   return line ? `${body}\n\n${line}` : body;
 }
 
-function recipientDisplayName(row: Record<string, unknown>): string | null {
-  return cleanString(row.recipient_name, 160) ?? localPart(cleanString(row.recipient_email, 320));
-}
-
-function localPart(email: string | null): string | null {
-  if (!email) return null;
-  return email.split("@")[0] || null;
-}
-
-function formatNameList(names: string[]): string {
-  if (names.length === 1) return names[0];
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
-}
 
 function quoteName(name: string): string {
   return `"${stripHeaderUnsafe(name).replaceAll('"', "'")}"`;

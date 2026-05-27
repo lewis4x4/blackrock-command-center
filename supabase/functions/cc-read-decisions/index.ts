@@ -428,6 +428,7 @@ function lateReplySummary(row: unknown, appById: Map<string, AppRecord>): Record
 }
 
 function routedSummaries(rows: unknown[], appById: Map<string, AppRecord>, answeredKeys: Set<string>): Record<string, unknown>[] {
+  // Do not include `superseded`: those sends were actively closed because a co-recipient answered.
   const awaitingReplyStates = new Set(["sent", "delivered", "opened", "clicked", "reminded", "awaiting_clarify", "clarify_sent"]);
   const byDecision = new Map<string, RoutedAccumulator>();
 

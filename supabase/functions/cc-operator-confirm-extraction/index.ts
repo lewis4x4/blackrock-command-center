@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, json, rpc, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
+import { ACCESS_REQUIRED, UUID_RE, cleanString, cpAudit, cpGet, cpPatch, json, notifyCoRecipientsFireAndForget, rpc, verifyAccessJwt, verifyWriteToken } from "../_shared/phase5.ts";
 
 const FUNCTION_NAME = "cc-operator-confirm-extraction";
 
@@ -71,6 +71,13 @@ Deno.serve(async (req) => {
     });
 
     await cpAudit(cleanString(send.app_id, 80), access.actor, "decision_operator_confirmed", { send_id: sendId, option_id: optionId, source: "extraction" });
+
+    const appId = cleanString(send.app_id, 80);
+    const issueId = cleanString(send.issue_id, 80);
+    const decisionExternalRef = cleanString(send.decision_external_ref, 200);
+    if (decisionAnswerId && UUID_RE.test(decisionAnswerId) && appId && UUID_RE.test(appId) && issueId && UUID_RE.test(issueId) && decisionExternalRef) {
+      notifyCoRecipientsFireAndForget({ app_id: appId, issue_id: issueId, decision_external_ref: decisionExternalRef, answer_id: decisionAnswerId }, "cc-operator-confirm-extraction");
+    }
 
     return json({ send: updated[0] ?? send, answer, work_order: workOrder, dispatched: cleanString(workOrder?.status, 40) === "queued" }, 200, access.headerValue);
   } catch (e) {
