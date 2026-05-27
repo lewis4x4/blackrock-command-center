@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   decisionRowTitle, loadDecisionRecipients, loadDecisionSend, routeDecision, rewriteDecision,
   type DecisionEmailSend, type DecisionOptionLike, type DecisionRecipient, type RiskClass,
@@ -19,12 +19,16 @@ type Status = 'idle' | 'loading' | 'ready' | 'sending' | 'sent' | 'error';
 export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClose, onSent }: Props) {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState('');
+  const [recipientWarning, setRecipientWarning] = useState('');
   const [send, setSend] = useState<DecisionEmailSend | null>(null);
   const [recipients, setRecipients] = useState<DecisionRecipient[]>([]);
   const [selectedRecipients, setSelectedRecipients] = useState<Set<string>>(new Set());
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [options, setOptions] = useState<DecisionOptionLike[]>([]);
+
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   const rawTitle = decisionRowTitle(decision);
   const rawBody = text(decision.summary) ?? text(decision.body) ?? text(decision.description) ?? '';
@@ -35,6 +39,7 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
     let cancelled = false;
     setStatus('loading');
     setError('');
+    setRecipientWarning('');
     setSend(null);
     setSubject('');
     setBody('');
@@ -53,10 +58,10 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
         })
         .catch((e) => {
           if (cancelled) return;
-          // Surface load errors as a non-fatal warning via the recipient empty state.
+          // Surface load errors as a non-fatal warning via the recipient panel.
           setRecipients([]);
           setSelectedRecipients(new Set());
-          console.warn('decision recipient load failed', e);
+          setRecipientWarning(e instanceof Error ? e.message : String(e));
         });
       const rewrite = await rewriteDecision({
         issue_id: issueId,
@@ -102,11 +107,55 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') onClose();
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const focusableSelector = [
+      'a[href]',
+      'button:not([disabled])',
+      'input:not([disabled])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+
+    const focusFirstControl = () => {
+      const focusable = modalRef.current?.querySelector<HTMLElement>(focusableSelector);
+      focusable?.focus();
     };
+
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (ev.key !== 'Tab') return;
+      const focusable = Array.from(modalRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
+        .filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (focusable.length === 0) {
+        ev.preventDefault();
+        modalRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (ev.shiftKey && document.activeElement === first) {
+        ev.preventDefault();
+        last.focus();
+      } else if (!ev.shiftKey && document.activeElement === last) {
+        ev.preventDefault();
+        first.focus();
+      }
+    };
+
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.setTimeout(focusFirstControl, 0);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = previous;
+      restoreFocusRef.current?.focus();
+    };
   }, [open, onClose]);
 
   if (!open) return null;
@@ -140,7 +189,7 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
   return (
     <div className="route-modal-root">
       <button className="route-modal-backdrop" onClick={onClose} aria-label="Close" />
-      <div className="route-modal-card" role="dialog" aria-modal="true" aria-label="Route to recipients">
+      <div className="route-modal-card" role="dialog" aria-modal="true" aria-label="Route to recipients" ref={modalRef} tabIndex={-1}>
         <div className="route-modal-head">
           <div>
             <div className="detail-eyebrow">Reviewing AI-rewritten decision email</div>
@@ -175,6 +224,7 @@ export function DecisionRouteModal({ open, demo, appId, issueId, decision, onClo
             </div>
             <div className="route-recipient-list">
               <div className="panel-label">Going to</div>
+              {recipientWarning && <div className="panel-note">Recipients could not be loaded: {recipientWarning}</div>}
               {recipients.length === 0 ? <div className="detail-placeholder">No active decision recipients for this app.</div> : recipients.map((recipient) => (
                 <label key={recipient.id} className="route-recipient-row">
                   <input type="checkbox" checked={selectedRecipients.has(recipient.id)} onChange={() => toggleRecipient(recipient.id)} />

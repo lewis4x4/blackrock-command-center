@@ -682,7 +682,7 @@ function readHeaders(): Record<string, string> {
 }
 
 function writeHeaders(): Record<string, string> {
-  const writeToken = (import.meta as any).env?.VITE_CC_WRITE_TOKEN ?? '';
+  const writeToken = import.meta.env.VITE_CC_WRITE_TOKEN ?? '';
   return { ...readHeaders(), 'x-cc-write-token': writeToken };
 }
 

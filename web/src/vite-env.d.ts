@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   readonly VITE_CC_FUNCTIONS_URL?: string;
   readonly VITE_CC_ACCESS_REQUIRED?: string;
   readonly VITE_CC_READ_TOKEN?: string;
+  readonly VITE_CC_WRITE_TOKEN?: string;
 }
 interface ImportMeta {
   readonly env: ImportMetaEnv;

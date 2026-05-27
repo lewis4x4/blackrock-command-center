@@ -298,7 +298,20 @@ function DecisionsAdminBand({ payload, loading }: { payload: AllDecisionsPayload
                 </thead>
                 <tbody>
                   {rows.map((row) => (
-                    <tr key={row.id} className="settings-decision-row" onClick={() => setSelected(row)} tabIndex={0} onKeyDown={(ev) => { if (ev.key === 'Enter') setSelected(row); }}>
+                    <tr
+                      key={row.id}
+                      className="settings-decision-row"
+                      onClick={() => setSelected(row)}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Open decision history for ${row.title}`}
+                      onKeyDown={(ev) => {
+                        if (ev.key === 'Enter' || ev.key === ' ') {
+                          ev.preventDefault();
+                          setSelected(row);
+                        }
+                      }}
+                    >
                       <td><div className="agents-primary">{row.title}</div><div className="agents-muted">{row.source_ref || row.id}</div></td>
                       <td><span className={'status-chip ' + row.status}>{label(row.status)}</span>{row.late_reply_count > 0 && <span className="settings-late-pill">Late reply</span>}</td>
                       <td>{row.app_short_code ?? row.app_display_name ?? '—'}</td>

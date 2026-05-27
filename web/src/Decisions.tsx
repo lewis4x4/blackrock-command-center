@@ -303,7 +303,7 @@ function DecisionCard({ decision, onOpen }: { decision: DecisionRow; onOpen: (de
         {text(decision.reminded_at) && <span>reminded {ago(text(decision.reminded_at)) ?? 'recently'}</span>}
       </div>
       <div className="decision-options">{decisionOptionsCopy(owner, emailState, options, decision)}</div>
-      <button className="btn-primary decision-route" style={{ width: '100%', minHeight: 44 }} type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(decision); }}>{decisionCta(emailState)}</button>
+      <span className="btn-primary decision-route" aria-hidden="true" style={{ width: '100%', minHeight: 44 }}>{decisionCta(emailState)}</span>
     </button>
   );
 }

@@ -58,7 +58,18 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
     Apps: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>,
     Files: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z" /><path d="M8 13h8M8 16h5" /></svg>,
     Settings: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06A2 2 0 1 1 22 7.09l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.61.78 1 1.42 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>,
+    Workspace: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9099AD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 5h16v14H4z" /><path d="M8 9h8M8 13h5" /></svg>,
   };
+
+  const navItems = [
+    { name: 'Home', page: 'home' },
+    { name: 'Decisions', page: 'decisions' },
+    { name: 'Agents', page: 'agents' },
+    { name: 'Apps', page: 'apps' },
+    { name: 'Files', page: 'files' },
+    { name: 'Workspace', page: 'workspace' },
+    { name: 'Settings', page: 'settings' },
+  ] as const;
 
   return (
     <div className="shell">
@@ -72,15 +83,15 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
             <div className="brand-sub">COMMAND CENTER</div>
           </div>
         </div>
-        <nav>
-          {(['Home', 'Decisions', 'Agents', 'Apps', 'Files', 'Workspace', 'Settings'] as const).map((name) => {
-            const page = name === 'Home' ? 'home' : name === 'Decisions' ? 'decisions' : name === 'Agents' ? 'agents' : name === 'Apps' ? 'apps' : name === 'Files' ? 'files' : name === 'Workspace' ? 'workspace' : 'settings';
-            const active = page === activePage;
+        <nav aria-label="Primary">
+          {navItems.map(({ name, page }) => {
+            const active = page === activePage || (page === 'apps' && activePage.startsWith('app:'));
             return (
               <button
                 key={name}
                 className={'nav-item' + (active ? ' active' : '')}
                 onClick={() => onNavigate(page)}
+                aria-current={active ? 'page' : undefined}
               >
                 {navIcons[name]}
                 <span className="nav-label">{name}</span>
@@ -118,6 +129,22 @@ export function Shell({ demo, apps, activePage, onNavigate, onRefresh, children 
         </div>
         <div className="content">{children}</div>
       </div>
+      <nav className="mobile-tabs" aria-label="Primary mobile">
+        {navItems.map(({ name, page }) => {
+          const active = page === activePage || (page === 'apps' && activePage.startsWith('app:'));
+          return (
+            <button
+              key={name}
+              className={'mobile-tab' + (active ? ' active' : '')}
+              onClick={() => onNavigate(page)}
+              aria-current={active ? 'page' : undefined}
+            >
+              {navIcons[name]}
+              <span>{name}</span>
+            </button>
+          );
+        })}
+      </nav>
     </div>
   );
 }

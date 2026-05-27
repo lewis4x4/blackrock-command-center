@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ACCESS_REQUIRED, ago, FUNCTIONS_URL, INITIAL_DEMO, READ_TOKEN } from './utils';
 
 type ArtifactKind = 'doc' | 'migration' | 'edge_function' | 'spec' | 'report' | 'web_source' | 'script' | 'agent_output' | 'pull_request';
@@ -423,22 +423,15 @@ function ArtifactRow({ item, expanded, onToggle }: { item: Artifact; expanded: b
     else onToggle();
   }
 
-  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      open();
-    }
-  }
-
   return (
     <div className={'file-row-wrap' + (expanded ? ' expanded' : '')}>
-      <div className="file-row" role="button" tabIndex={0} onClick={open} onKeyDown={onKeyDown}>
+      <button className="file-row" type="button" onClick={open}>
         <span className={'kind-chip kind-' + item.kind}>{KIND_LABEL[item.kind]}</span>
-        <div className="file-title" title={item.title}>{item.title}</div>
-        <div className="file-path" title={item.path ?? item.url ?? undefined}>{item.path ?? item.url ?? '—'}</div>
-        <div className="file-size">{bytes(item.byte_size)}</div>
-        <div className="file-age">{ago(item.last_indexed_at) ?? '—'}</div>
-      </div>
+        <span className="file-title" title={item.title}>{item.title}</span>
+        <span className="file-path" title={item.path ?? item.url ?? undefined}>{item.path ?? item.url ?? '—'}</span>
+        <span className="file-size">{bytes(item.byte_size)}</span>
+        <span className="file-age">{ago(item.last_indexed_at) ?? '—'}</span>
+      </button>
       {expanded && !item.url && <ArtifactDrawer item={item} />}
     </div>
   );
